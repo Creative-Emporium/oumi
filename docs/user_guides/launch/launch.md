@@ -26,11 +26,11 @@ When you submit a job to the launcher it will handle queueing your job in the pr
 The Oumi launcher integrates with SkyPilot to launch jobs on various cloud providers. To run on a cloud GPU cluster, first make sure to have all the dependencies installed for your desired cloud provider:
 
   ```shell
-  pip install oumi[aws]     # For Amazon Web Services
-  pip install oumi[azure]   # For Microsoft Azure
-  pip install oumi[gcp]     # For Google Cloud Platform
-  pip install oumi[lambda]  # For Lambda Cloud
-  pip install oumi[runpod]  # For RunPod
+  pip install "oumi[aws]"     # For Amazon Web Services
+  pip install "oumi[azure]"   # For Microsoft Azure
+  pip install "oumi[gcp]"     # For Google Cloud Platform
+  pip install "oumi[lambda]"  # For Lambda Cloud
+  pip install "oumi[runpod]"  # For RunPod
   ```
 
 Then, you need to enable your desired cloud provider in SkyPilot. Run `sky check` to check which providers you have enabled, along with instructions on how to enable the ones you don't. More detailed setup instructions can be found in [SkyPilot's documentation](https://skypilot.readthedocs.io/en/latest/getting-started/installation.html#cloud-account-setup).
@@ -67,7 +67,7 @@ working_dir: .
 
 # NOTE: Uncomment the following lines to download locked-down models from HF Hub.
 # file_mounts:
-#   ~/.cache/huggingface/token: ~/.cache/huggingface/token
+#   ~/.cache/huggingface/token: ~/.cache/huggingface/token # HF credentials
 
 # NOTE: Uncomment the following lines to mount a cloud bucket to your VM.
 # For more details, see https://oumi.ai/docs/en/latest/user_guides/launch/launch.html.
@@ -118,7 +118,7 @@ working_dir: .
 
 # NOTE: Uncomment the following lines to download locked-down models from HF Hub.
 # file_mounts:
-#   ~/.cache/huggingface/token: ~/.cache/huggingface/token
+#   ~/.cache/huggingface/token: ~/.cache/huggingface/token # HF credentials
 
 # NOTE: Uncomment the following lines to mount a cloud bucket to your VM.
 # For more details, see https://oumi.ai/docs/en/latest/user_guides/launch/launch.html.
@@ -169,7 +169,7 @@ working_dir: .
 
 # NOTE: Uncomment the following lines to download locked-down models from HF Hub.
 # file_mounts:
-#   ~/.cache/huggingface/token: ~/.cache/huggingface/token
+#   ~/.cache/huggingface/token: ~/.cache/huggingface/token # HF credentials
 
 # NOTE: Uncomment the following lines to mount a cloud bucket to your VM.
 # For more details, see https://oumi.ai/docs/en/latest/user_guides/launch/launch.html.
@@ -220,7 +220,7 @@ working_dir: .
 
 # NOTE: Uncomment the following lines to download locked-down models from HF Hub.
 # file_mounts:
-#   ~/.cache/huggingface/token: ~/.cache/huggingface/token
+#   ~/.cache/huggingface/token: ~/.cache/huggingface/token # HF credentials
 
 # NOTE: Uncomment the following lines to mount a cloud bucket to your VM.
 # For more details, see https://oumi.ai/docs/en/latest/user_guides/launch/launch.html.
@@ -271,7 +271,7 @@ working_dir: .
 
 # NOTE: Uncomment the following lines to download locked-down models from HF Hub.
 # file_mounts:
-#   ~/.cache/huggingface/token: ~/.cache/huggingface/token
+#   ~/.cache/huggingface/token: ~/.cache/huggingface/token # HF credentials
 
 # NOTE: Uncomment the following lines to mount a cloud bucket to your VM.
 # For more details, see https://oumi.ai/docs/en/latest/user_guides/launch/launch.html.
@@ -375,9 +375,6 @@ To find out more about the GPUs available on your cloud provider, you can use sk
 sky show-gpus
 ```
 
-If you made any code changes to the oumi codebase (not including configs), you need to run
-`pip install '.'` in the `run` section of the job config to install the
-changes on the cluster.
 :::
 
 :::{tab-item} Python
@@ -410,11 +407,12 @@ To find out more about the GPUs available on your cloud provider, you can use sk
 sky show-gpus
 ```
 
-If you made any code changes to the oumi codebase (not including configs), you need to run
-`pip install '.'` in the `run` section of the job config to install the
-changes on the cluster.
 :::
 ::::
+
+### Code Development
+
+You can use the Oumi job launcher as part of your development process using Oumi if your code changes need to be tested outside your local machine. First, make sure to follow the {doc}`/development/dev_setup` guide to install Oumi from source. Then, make sure your job config uses `pip install -e .` instead of `pip install oumi` in the setup section. This lets the job pick up on your local changes by installing Oumi from source, in addition to automatically applying your code changes on the remote machine with the editable installation.
 
 #### Spot instances
 
@@ -539,7 +537,7 @@ To stop the cluster when you are done to avoid extra charges, run:
 oumi launch stop --cluster my-cluster
 ```
 
-In addition, the Oumi launcher automatically sets [`idle_minutes_to_autostop`](https://docs.skypilot.co/en/latest/reference/api.html#sky.launch) to 60, i.e. clusters will stop automatically after 60 minutes of no jobs running.
+In addition, the Oumi launcher automatically sets [`idle_minutes_to_autostop`](https://docs.skypilot.co/en/latest/reference/api.html#sky.launch) to 60, i.e. clusters will stop automatically after 60 minutes of no jobs running. Note that this isn't done for clouds that don't support stopping jobs, like RunPod and Lambda.
 
 Stopped clusters preserve their disk, and are quicker to initialize than turning up a brand new cluster. Stopped clusters can be automatically restarted by specifying them in an `oumi launch up` command.
 
@@ -560,7 +558,7 @@ import oumi.launcher as launcher
 launcher.stop(cloud_name="gcp", cluster_name="my-cluster")
 ```
 
-In addition, Oumi automatically sets [`idle_minutes_to_autostop`](https://docs.skypilot.co/en/latest/reference/api.html#sky.launch) to 60, i.e. clusters will stop automatically after 60 minutes of no jobs running.
+In addition, Oumi automatically sets [`idle_minutes_to_autostop`](https://docs.skypilot.co/en/latest/reference/api.html#sky.launch) to 60, i.e. clusters will stop automatically after 60 minutes of no jobs running. Note that this isn't done for clouds that don't support stopping jobs, like RunPod and Lambda.
 
 Stopped clusters preserve their disk, and are quicker to initialize than turning up a brand new cluster. Stopped clusters can be automatically restarted by specifying them in a `launcher.up(...)` command.
 

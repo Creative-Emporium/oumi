@@ -38,6 +38,8 @@ training:  # Training parameters
   output_dir: "output/my_run"
   num_train_epochs: 3
   learning_rate: 5e-5
+  grpo:   # Optional GRPO settings
+    num_generations: 2
 
 peft:  # Optional PEFT settings
   peft_method: "lora"
@@ -58,32 +60,33 @@ Configure the model architecture and loading using the {py:obj}`~oumi.core.confi
 ```yaml
 model:
   # Required
-  model_name: "meta-llama/Llama-2-7b-hf"    # Model ID or path (REQUIRED)
+  model_name: "meta-llama/Llama-3.1-8B-Instruct"    # Model ID or path (REQUIRED)
 
   # Model loading
-  adapter_model: null                        # Path to adapter model (auto-detected if model_name is adapter)
-  tokenizer_name: null                       # Custom tokenizer name/path (defaults to model_name)
-  tokenizer_pad_token: null                  # Override pad token
-  tokenizer_kwargs: {}                       # Additional tokenizer args
-  model_max_length: null                     # Max sequence length (positive int or null)
-  load_pretrained_weights: true              # Load pretrained weights
-  trust_remote_code: false                   # Allow remote code execution (use with trusted models only)
+  adapter_model: null                                # Path to adapter model (auto-detected if model_name is adapter)
+  tokenizer_name: null                               # Custom tokenizer name/path (defaults to model_name)
+  tokenizer_pad_token: null                          # Override pad token
+  tokenizer_kwargs: {}                               # Additional tokenizer args
+  model_max_length: null                             # Max sequence length (positive int or null)
+  load_pretrained_weights: true                      # Load pretrained weights
+  trust_remote_code: false                           # Allow remote code execution (use with trusted models only)
+  model_revision: null                               # Model revision to use (e.g., "prequantized")
 
   # Model precision and hardware
-  torch_dtype_str: "float32"                 # Model precision (float32/float16/bfloat16/float64)
-  device_map: "auto"                         # Device placement strategy (auto/null)
-  compile: false                             # JIT compile model (use TrainingParams.compile for training)
+  torch_dtype_str: "float32"                         # Model precision (float32/float16/bfloat16/float64)
+  device_map: "auto"                                 # Device placement strategy (auto/null)
+  compile: false                                     # JIT compile model (use TrainingParams.compile for training)
 
   # Attention and optimization
-  attn_implementation: null                  # Attention impl (null/sdpa/flash_attention_2/eager)
-  enable_liger_kernel: false                 # Enable Liger CUDA kernel for potential speedup
+  attn_implementation: null                          # Attention impl (null/sdpa/flash_attention_2/eager)
+  enable_liger_kernel: false                         # Enable Liger CUDA kernel for potential speedup
 
   # Model behavior
-  chat_template: null                        # Chat formatting template
-  freeze_layers: []                          # Layer names to freeze during training
+  chat_template: null                                # Chat formatting template
+  freeze_layers: []                                  # Layer names to freeze during training
 
   # Additional settings
-  model_kwargs: {}                           # Additional model constructor args
+  model_kwargs: {}                                   # Additional model constructor args
 ```
 
 ### Data Configuration
@@ -109,6 +112,7 @@ data:
 
     # Split-level settings
     collator_name: "text_with_padding"      # Data collator type
+    collator_kwargs: {}                     # Additional collator constructor args
     pack: false                             # Pack text into constant-length chunks
     stream: false                           # Enable dataset streaming
     mixture_strategy: "first_exhausted"     # Strategy for mixing datasets
@@ -123,6 +127,7 @@ data:
 ```
 
 Notes:
+
 - When using multiple datasets in a split with `mixture_proportion`:
   - All datasets must specify a `mixture_proportion`
   - The sum of all proportions must equal 1.0
@@ -134,6 +139,12 @@ Notes:
   - `target_col` must be specified
 - All splits must use the same collator type if specified
 - If a collator is specified for validation/test, it must also be specified for train
+- `collator_kwargs` allows customizing collator behavior with additional parameters:
+  - For `text_with_padding`: Can set `max_variable_sized_dims` to control padding dimensions
+  - For `vision_language_with_padding`: Can override `allow_multi_image_inputs` or `main_image_feature`
+  - For `vision_language_sft`: Can override `allow_multi_image_inputs`, `truncation_side`, etc.
+  - Config-provided kwargs take precedence over automatically determined values
+
 
 ### Training Configuration
 
@@ -145,6 +156,7 @@ training:
   output_dir: "output"                    # Directory for saving outputs
   run_name: null                          # Unique identifier for the run
   seed: 42                                # Random seed for reproducibility
+  use_deterministic: false                # Use deterministic CuDNN algorithms
 
   # Training duration
   num_train_epochs: 3                     # Number of training epochs
@@ -157,7 +169,8 @@ training:
 
   # Optimization
   learning_rate: 5e-5                     # Initial learning rate
-  optimizer: "adamw_torch"                # Optimizer type
+  optimizer: "adamw_torch"                # Optimizer type ("adam", "adamw", "adamw_torch", "adamw_torch_fused", "sgd", "adafactor")
+                                          # "adamw_8bit", "paged_adamw_8bit", "paged_adamw", "paged_adamw_32bit" (requires bitsandbytes)
   weight_decay: 0.0                       # Weight decay for regularization
   max_grad_norm: 1.0                      # Max gradient norm for clipping
 
@@ -212,6 +225,31 @@ training:
   include_alternative_mfu_metrics: false  # Include alternative MFU metrics
   log_model_summary: false                # Print model layer summary
   empty_device_cache_steps: null          # Steps between cache clearing
+
+  # Settings if using GRPO. See below for more details.
+  grpo:
+    num_generations: null
+```
+
+### GRPO Configuration
+
+Configure group relative policy optimization using the {py:obj}`~oumi.core.configs.params.grpo_params.GrpoParams` class:
+
+```yaml
+training:
+  grpo:
+    model_init_kwargs: {}                     # Keyword args for AutoModelForCausalLM.from_pretrained
+    max_prompt_length: null                   # Max prompt length in input
+    max_completion_length: null               # Max completion length during generation
+    num_generations: null                     # Generations per prompt
+    temperature: 0.9                          # Sampling temperature (higher = more random)
+    remove_unused_columns: false              # If true, only keep the "prompt" column
+    repetition_penalty: 1.0                   # Penalty for token repetition (>1 discourages repetition)
+
+    # vLLM settings for generation
+    use_vllm: false                           # Use vLLM for generation
+    vllm_mode: null                           # Use server or colocate mode for vLLM
+    vllm_gpu_memory_utilization: 0.9          # VRAM fraction for vLLM (0-1)
 ```
 
 ### PEFT Configuration
@@ -237,6 +275,7 @@ peft:
   use_bnb_nested_quant: false        # Use nested quantization
   bnb_4bit_quant_storage: "uint8"    # Storage type for params
   bnb_4bit_compute_dtype: "float32"  # Compute type for params
+  llm_int8_skip_modules: "none"      # A list of modules that we do not want to convert in 8-bit.
 ```
 
 ### FSDP Configuration
@@ -264,6 +303,7 @@ fsdp:
 ```
 
 Notes on FSDP sharding strategies:
+
 - `FULL_SHARD`: Shards model parameters, gradients, and optimizer states. Most memory efficient but may impact performance.
 - `SHARD_GRAD_OP`: Shards gradients and optimizer states only. Balances memory and performance.
 - `HYBRID_SHARD`: Shards parameters within a node, replicates across nodes.
@@ -302,6 +342,16 @@ This example shows how to fine-tune a medium-sized model ('Llama-3.1-8b') using 
 
 ````{dropdown} configs/recipes/llama3_1/sft/8b_full/train.yaml
 ```{literalinclude} ../../../configs/recipes/llama3_1/sft/8b_full/train.yaml
+:language: yaml
+```
+````
+
+### Group Relative Policy Optimization (GRPO)
+
+This example shows how to train a model using the GRPO reinforcement learning algorithm:
+
+````{dropdown} configs/examples/grpo_tldr/train.yaml
+```{literalinclude} ../../../configs/examples/grpo_tldr/train.yaml
 :language: yaml
 ```
 ````

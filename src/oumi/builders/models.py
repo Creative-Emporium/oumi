@@ -1,12 +1,27 @@
+# Copyright 2025 - Oumi
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from pathlib import Path
-from typing import Literal, Optional, Union, cast
+from typing import Optional, Union, cast
 
 import torch
 import torch.nn as nn
 import transformers
-from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
+from peft import PeftModel, get_peft_model, prepare_model_for_kbit_training
+from transformers import Mxfp4Config  # pyright: ignore[reportAttributeAccessIssue]
 
-from oumi.core.configs import LoraWeightInitialization, ModelParams, PeftParams
+from oumi.core.configs import ModelParams, PeftParams
 from oumi.core.configs.internal.internal_model_config import InternalModelConfig
 from oumi.core.configs.internal.supported_models import (
     find_internal_model_config_using_model_name,
@@ -27,6 +42,13 @@ try:
     import liger_kernel.transformers  # type: ignore
 except ImportError:
     liger_kernel = None
+
+# Import `onebitllms` utils methods
+try:
+    import onebitllms  # type: ignore
+    from onebitllms import replace_linear_with_bitnet_linear  # type: ignore
+except ImportError:
+    onebitllms = None
 
 
 def build_model(
@@ -70,6 +92,19 @@ def build_model(
 
     if model_params.enable_liger_kernel:
         _patch_model_for_liger_kernel(model)
+
+    if model_params.model_name in (
+        "tiiuae/Falcon-E-1B-Base",
+        "tiiuae/Falcon-E-1B-Instruct",
+        "tiiuae/Falcon-E-3B-Base",
+        "tiiuae/Falcon-E-3B-Instruct",
+    ):
+        if onebitllms is None:
+            raise ValueError(
+                """Please install `onebitllms` in order to fine-tune
+                `Falcon-E` models - `pip install onebitllms`"""
+            )
+        model = replace_linear_with_bitnet_linear(model)
 
     if len(model_params.freeze_layers) > 0:
         num_frozen = freeze_model_layers(model, model_params.freeze_layers)
@@ -150,6 +185,46 @@ def build_oumi_model(
     return model
 
 
+def _get_quantization_config_for_training(model_params: ModelParams):
+    """Get the appropriate quantization config for training.
+
+    For MXFP4 quantized models that need dequantization during training,
+    this creates the appropriate Mxfp4Config(dequantize=True) configuration.
+
+    Args:
+        model_params: Model parameters that may contain quantization config.
+
+    Returns:
+        Quantization config object or None if no quantization needed.
+    """
+    # Check if model_kwargs contains quantization_config
+    if not model_params.model_kwargs:
+        return None
+
+    quant_config = model_params.model_kwargs.get("quantization_config")
+    if not quant_config:
+        return None
+
+    # Handle MXFP4 quantization for training (requires dequantization)
+    if isinstance(quant_config, dict) and quant_config.get("quant_method") == "mxfp4":
+        logger.info(
+            "Detected MXFP4 quantized model. Creating Mxfp4Config(dequantize=True) "
+            "for training."
+        )
+        return Mxfp4Config(dequantize=True)  # pyright: ignore[reportOptionalCall]
+
+    return None
+
+
+def _disable_cache_in_model_config(model: transformers.PreTrainedModel) -> None:
+    # Required for FSDP.
+    # Context: https://github.com/huggingface/transformers/issues/28499
+    model.config.use_cache = False
+    if hasattr(model.config, "text_config"):
+        # This may be needed for VLM-s.
+        model.config.text_config.use_cache = False
+
+
 def build_huggingface_model(
     model_params: ModelParams,
     peft_params: Optional[PeftParams] = None,
@@ -187,7 +262,10 @@ def build_huggingface_model(
     )
 
     hf_config = find_model_hf_config(
-        model_params.model_name, trust_remote_code=model_params.trust_remote_code
+        model_params.model_name,
+        trust_remote_code=model_params.trust_remote_code,
+        revision=model_params.model_revision,
+        **model_params.model_kwargs,
     )
 
     # (Experimental) Detects dropout probabilities in config and sets them to 0.0.
@@ -195,39 +273,42 @@ def build_huggingface_model(
         disable_dropout(hf_config)
         del model_params.model_kwargs["disable_dropout"]
 
+    # Handle different quantization configurations
     if peft_params and peft_params.q_lora:
         quantization_config = peft_params.to_bits_and_bytes()
     else:
-        quantization_config = None
+        quantization_config = _get_quantization_config_for_training(model_params)
 
     # Both functions instantiate a model from the config, but the main difference is
     # `load_pretrained_weights` also loads the weights, and `from_config` initializes
     # the weights from scratch based on the params in the config and the model class.
     transformers_model_class = _get_transformers_model_class(hf_config)
+    # Pass in the parsed torch dtype, else pass in the stringified version (which
+    # currently can only be "auto").
+    torch_dtype = model_params.torch_dtype or model_params.torch_dtype_str
 
     if model_params.load_pretrained_weights:
         model = transformers_model_class.from_pretrained(
             config=hf_config,
-            torch_dtype=model_params.torch_dtype,
+            torch_dtype=torch_dtype,
             device_map=device_map,
             trust_remote_code=model_params.trust_remote_code,
             pretrained_model_name_or_path=model_params.model_name,
             quantization_config=quantization_config,
             attn_implementation=model_params.attn_implementation,
+            revision=model_params.model_revision,
             **kwargs,
         )
     else:
         model = transformers_model_class.from_config(
             config=hf_config,
-            torch_dtype=model_params.torch_dtype,
+            torch_dtype=torch_dtype,
             trust_remote_code=model_params.trust_remote_code,
             attn_implementation=model_params.attn_implementation,
             **kwargs,
         )
 
-    # Required for FSDP.
-    # Context: https://github.com/huggingface/transformers/issues/28499
-    model.config.use_cache = False
+    _disable_cache_in_model_config(model)
 
     # TODO Find a better way to handle it
 
@@ -333,9 +414,7 @@ def build_cambrian_model(
         model_path, None, model_name, device_map=(device_map or "auto")
     )
 
-    # Required for FSDP.
-    # Context: https://github.com/huggingface/transformers/issues/28499
-    model.config.use_cache = False
+    _disable_cache_in_model_config(model)
 
     # TODO Find a better way to handle it
 
@@ -365,6 +444,14 @@ def build_tokenizer(
         # If no specific tokenizer is defined, fall back to model's default.
         tokenizer_name = model_params.model_name
 
+    # String for logging
+    if tokenizer_name != model_params.model_name:
+        tokenizer_id_str = (
+            f"tokenizer '{tokenizer_name}' and model '{model_params.model_name}'"
+        )
+    else:
+        tokenizer_id_str = f"model '{model_params.model_name}'"
+
     internal_config: Optional[InternalModelConfig] = (
         find_internal_model_config_using_model_name(
             model_name=tokenizer_name,
@@ -381,7 +468,7 @@ def build_tokenizer(
             padding_side = str(internal_config.padding_side.value)
             logger.info(
                 f"Setting tokenizer to use the '{padding_side}' padding side "
-                f"for model '{model_params.model_name}'. "
+                f"for {tokenizer_id_str}. "
                 f"The '{padding_side}' padding side is configured as the default value "
                 "for this model type."
             )
@@ -424,11 +511,13 @@ def build_tokenizer(
         tokenizer.model_max_length = model_params.model_max_length
 
     template_name: str = ""
-    if model_params.chat_template:
+    if model_params.chat_template == "auto":
+        # "auto" means use model's built-in template, don't override
         logger.info(
-            f"Using the chat template '{model_params.chat_template}' "
-            "specified in model config!"
+            f"Chat template set to 'auto' - using model's built-in template "
+            f"for {tokenizer_id_str}."
         )
+    elif model_params.chat_template is not None:
         template_name = model_params.chat_template
     else:
         # Try to find the default chat template by model type.
@@ -436,47 +525,30 @@ def build_tokenizer(
             template_name = internal_config.chat_template
             logger.info(
                 f"Using the chat template '{template_name}', which is the default "
-                f"for model '{model_params.model_name}'."
+                f"for {tokenizer_id_str}. "
             )
         elif not tokenizer.chat_template:
             template_name = "default"
             logger.warning(
-                "No chat template found for tokenizer. "
+                f"No chat template found for tokenizer for {tokenizer_id_str}. "
                 "Please specify a chat template using the `chat_template` field. "
                 "This will be required in future versions of Oumi."
             )
             logger.warning(
                 "Setting tokenizer to use the 'default' chat template "
-                f"for model '{model_params.model_name}'. "
+                f"for {tokenizer_id_str}. "
                 "The 'default' template does not use any special tokens, "
                 "and is unlikely to yield good results."
+            )
+        else:
+            logger.info(
+                f"Using the model's built-in chat template for {tokenizer_id_str}."
             )
 
     if template_name:
         tokenizer.chat_template = build_chat_template(template_name=template_name)
 
     return tokenizer
-
-
-def _convert_lora_init_weights_to_lora_config(
-    param: LoraWeightInitialization,
-) -> Union[
-    bool,
-    Literal[
-        "gaussian",
-        "eva",
-        "pissa",
-        "pissa_niter_[number of iters]",
-        "loftq",
-        "olora",
-    ],
-]:
-    if param == LoraWeightInitialization.RANDOM:
-        return False
-    if param == LoraWeightInitialization.DEFAULT:
-        return True
-
-    return param.value
 
 
 def build_peft_model(
@@ -492,18 +564,7 @@ def build_peft_model(
     Returns:
         The built PEFT model.
     """
-    lora_config = LoraConfig(
-        r=peft_params.lora_r,
-        lora_alpha=peft_params.lora_alpha,
-        lora_dropout=peft_params.lora_dropout,
-        target_modules=peft_params.lora_target_modules,
-        modules_to_save=peft_params.lora_modules_to_save,
-        bias=peft_params.lora_bias,  # type: ignore
-        task_type=peft_params.lora_task_type,
-        init_lora_weights=(
-            _convert_lora_init_weights_to_lora_config(peft_params.lora_init_weights)
-        ),
-    )
+    lora_config = peft_params.to_lora()
 
     if peft_params.q_lora:
         model = prepare_model_for_kbit_training(

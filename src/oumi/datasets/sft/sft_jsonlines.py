@@ -1,3 +1,17 @@
+# Copyright 2025 - Oumi
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from pathlib import Path
 from typing import Any, Optional, Union
 
@@ -119,8 +133,7 @@ class TextSftJsonLinesDataset(BaseSftDataset):
 
         if format and format not in ["oumi", "alpaca"]:
             raise ValueError(
-                f"Invalid format: {format}. "
-                "Supported formats are 'oumi', and 'alpaca'."
+                f"Invalid format: {format}. Supported formats are 'oumi', and 'alpaca'."
             )
 
         self._format: str = format if format else self._detect_format(data_frame)
@@ -154,7 +167,18 @@ class TextSftJsonLinesDataset(BaseSftDataset):
                 for m in first_item["messages"]
             ):
                 return "oumi"
-            return "conversations"
+
+        elif "conversation" in first_item:
+            if (
+                isinstance(first_item["conversation"], dict)
+                and "messages" in first_item["conversation"]
+                and isinstance(first_item["conversation"]["messages"], list)
+                and all(
+                    isinstance(m, dict) and "role" in m and "content" in m
+                    for m in first_item["conversation"]["messages"]
+                )
+            ):
+                return "conversations"
 
         elif all(key in first_item for key in ["instruction", "input", "output"]):
             return "alpaca"
@@ -164,9 +188,11 @@ class TextSftJsonLinesDataset(BaseSftDataset):
             "The data structure doesn't match any supported format. "
             "Please specify the format manually or ensure your data follows "
             "one of these structures:\n"
-            "1. Conversations format: "
+            "1. Messages format: "
             "{'messages': [{'role': 'user', 'content': '...'}, ...]}\n"
-            "2. Alpaca format: "
+            "2. Conversations format: "
+            "{'conversation': {'messages': [{'role': ..., 'content': ...}, ...]}}\n"
+            "3. Alpaca format: "
             "{'instruction': '...', 'input': '...', 'output': '...'}\n"
         )
 
@@ -199,6 +225,16 @@ class TextSftJsonLinesDataset(BaseSftDataset):
 
         elif self._format == "alpaca":
             return self._alpaca_to_conversation(conversation_dict)
+
+        elif self._format == "conversations":
+            try:
+                return Conversation.model_validate(conversation_dict["conversation"])
+            except Exception as e:
+                raise ValueError(
+                    f"Invalid conversation format. "
+                    f"Expected a dictionary with a 'conversation' key "
+                    f"containing a conversation object. Error: {str(e)}"
+                ) from e
 
         else:
             raise ValueError(f"Unsupported format: {self._format}")

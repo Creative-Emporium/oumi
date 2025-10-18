@@ -43,7 +43,7 @@ Example `config.yaml`:
 
 ```yaml
 model:
-  model_name: "meta-llama/Meta-Llama-3.1-8B-Instruct"
+  model_name: "meta-llama/Llama-3.1-8B-Instruct"
   model_kwargs:
     device_map: "auto"
     torch_dtype: "float16"
@@ -75,8 +75,8 @@ oumi infer -i -c configs/chat.yaml --model.device_map cuda:0
 # Process dataset
 oumi infer -c configs/batch.yaml \
   --input_path dataset.jsonl \
-  --output results.jsonl \
-  --batch-size 32
+  --output_path results.jsonl \
+  --generation.batch_size 32
 ```
 
 ### Multi-GPU Inference

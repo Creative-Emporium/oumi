@@ -1,3 +1,17 @@
+# Copyright 2025 - Oumi
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -7,11 +21,11 @@ from oumi.core.configs.params.guided_decoding_params import GuidedDecodingParams
 
 @dataclass
 class GenerationParams(BaseParams):
-    max_new_tokens: int = 256
+    max_new_tokens: int = 1024
     """The maximum number of new tokens to generate.
 
     This limits the length of the generated text to prevent excessively long outputs.
-    Default is 256 tokens.
+    Default is 1024 tokens.
     """
 
     batch_size: Optional[int] = 1
@@ -105,6 +119,15 @@ class GenerationParams(BaseParams):
 
     guided_decoding: Optional[GuidedDecodingParams] = None
     """Parameters for guided decoding."""
+
+    skip_special_tokens: bool = True
+    """Whether to skip special tokens when decoding the generated text.
+
+    When True (default), special tokens like <eos>, <pad>, etc. are removed from
+    the output text. When False, these tokens are included in the decoded text.
+    This can be useful for models that use special tokens as part of their output
+    format (e.g., reasoning tokens, tool call markers).
+    """
 
     def __post_init__(self):
         """Validates generation-specific parameters."""

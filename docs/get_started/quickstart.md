@@ -60,19 +60,20 @@ You can quickly start training a model using any of existing {doc}`recipes </res
 oumi train -c configs/recipes/smollm/sft/135m/quickstart_train.yaml
 ```
 
-You can easily override any parameters directly in the command line, for example:
+Any Oumi command which takes a config path as an argument (`train`, `evaluate`, `infer`, etc.) can override parameters from the command line. See {doc}`/cli/commands` for more details. For example:
 
 ```bash
 oumi train -c configs/recipes/smollm/sft/135m/quickstart_train.yaml \
   --training.max_steps 20 \
   --training.learning_rate 1e-4 \
+  --data.train.datasets[0].shuffle true \
   --training.output_dir output/smollm-135m-sft
 ```
 
 To run the same recipe on your own dataset (e.g., in our supported JSON or JSONL formats), you can override the dataset name and path. You can try this functionality out by downloading the `alpaca_cleaned` dataset manually via the huggingface CLI, then including that local path in your run.
 
 ```bash
-huggingface-cli download yahma/alpaca-cleaned --repo-type dataset --local-dir /path/to/local/dataset
+hf download yahma/alpaca-cleaned --repo-type dataset --local-dir /path/to/local/dataset
 
 oumi train -c configs/recipes/smollm/sft/135m/quickstart_train.yaml \
   --data.train.datasets "[{dataset_name: text_sft, dataset_path: /path/to/local/dataset}]" \

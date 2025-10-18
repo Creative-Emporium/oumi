@@ -1,7 +1,16 @@
 name: "CPU Tests"
 
 on:
+  schedule:
+    - cron: '0 */8 * * *' # Every 8 hours
+  workflow_dispatch:
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - 'notebooks/**'
+      - 'scripts/**'
+      - 'README.md'
+  merge_group:
     paths-ignore:
       - 'docs/**'
       - 'notebooks/**'
@@ -10,6 +19,8 @@ on:
 
 jobs:
   static-checks:
+    permissions:
+      contents: 'read'
     runs-on: ubuntu-24.04
 
     steps:

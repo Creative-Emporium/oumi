@@ -122,14 +122,14 @@ def test_get_request_headers(gcp_engine, remote_params):
 def test_convert_conversation_to_api_input_text(gcp_engine, inference_config):
     conversation = create_test_text_only_conversation()
     api_input = gcp_engine._convert_conversation_to_api_input(
-        conversation, inference_config.generation
+        conversation, inference_config.generation, gcp_engine._model_params
     )
     assert api_input["model"] == "gcp-model"
     assert len(conversation.messages) == 3
     assert len(api_input["messages"]) == 3
-    assert all(
-        [isinstance(m["content"], str) for m in api_input["messages"]]
-    ), api_input["messages"]
+    assert all([isinstance(m["content"], str) for m in api_input["messages"]]), (
+        api_input["messages"]
+    )
     assert api_input["max_completion_tokens"] == 100
     assert api_input["temperature"] == 0.7
     assert api_input["top_p"] == 0.9
@@ -138,7 +138,7 @@ def test_convert_conversation_to_api_input_text(gcp_engine, inference_config):
 def test_convert_conversation_to_api_input_multimodal(gcp_engine, inference_config):
     conversation = create_test_multimodal_text_image_conversation()
     api_input = gcp_engine._convert_conversation_to_api_input(
-        conversation, inference_config.generation
+        conversation, inference_config.generation, gcp_engine._model_params
     )
     assert api_input["model"] == "gcp-model"
     assert len(conversation.messages) == 3
@@ -159,7 +159,7 @@ def test_convert_conversation_to_api_input_multimodal(gcp_engine, inference_conf
 def test_infer_online_text(gcp_engine, conversation, inference_config):
     with patch.object(gcp_engine, "_infer", new_callable=AsyncMock) as mock_infer:
         mock_infer.return_value = [conversation]
-        results = gcp_engine.infer_online([conversation], inference_config)
+        results = gcp_engine.infer([conversation], inference_config)
 
     assert len(results) == 1
     assert results[0] == conversation
@@ -175,9 +175,110 @@ def test_infer_from_file(gcp_engine, conversation, inference_config, tmp_path):
         json.dump(conversation.to_dict(), f)
         f.write("\n")
 
-    with patch.object(gcp_engine, "_infer", new_callable=AsyncMock) as mock_infer:
-        mock_infer.return_value = [conversation]
-        results = gcp_engine.infer_from_file(str(input_file), inference_config)
+    with patch.object(
+        gcp_engine,
+        "_infer",
+        new_callable=AsyncMock,
+        side_effect=lambda convs, config: convs,
+    ):
+        inference_config.input_path = str(input_file)
+        results = gcp_engine.infer(inference_config=inference_config)
 
     assert len(results) == 1
-    assert results[0] == conversation
+    assert results[0].messages == conversation.messages
+    assert results[0].metadata == conversation.metadata
+    if conversation.conversation_id is not None:
+        assert results[0].conversation_id == conversation.conversation_id
+
+
+def test_remote_params_defaults():
+    gcp_engine = GoogleVertexInferenceEngine(
+        model_params=ModelParams(model_name="some_model"),
+    )
+    assert gcp_engine._remote_params.num_workers == 10
+    assert gcp_engine._remote_params.politeness_policy == 60.0
+
+
+def test_setting_api_url_via_constructor_region_and_project_id():
+    gcp_engine = GoogleVertexInferenceEngine(
+        model_params=ModelParams(model_name="some_model"),
+        project_id="test_project_id",
+        region="test_region",
+    )
+
+    # The method `_set_required_fields_for_inference` is called right before querying
+    # the remote API (with `_query_api`) to validate/update the remote params.
+    remote_params = RemoteParams()
+    gcp_engine._set_required_fields_for_inference(remote_params)
+
+    expected_api_url = (
+        "https://test_region-aiplatform.googleapis.com/v1beta1/projects/"
+        "test_project_id/locations/test_region/endpoints/openapi/chat/completions"
+    )
+    assert remote_params.api_url == expected_api_url
+
+
+@patch("os.getenv")
+def test_setting_api_url_via_env_region_and_project_id(mock_getenv):
+    def mock_getenv_fn(key):
+        return {"PROJECT_ID": "test_project_id", "REGION": "test_region"}.get(key)
+
+    mock_getenv.side_effect = mock_getenv_fn
+
+    gcp_engine = GoogleVertexInferenceEngine(
+        model_params=ModelParams(model_name="some_model"),
+    )
+
+    # The method `_set_required_fields_for_inference` is called right before querying
+    # the remote API (with `_query_api`) to validate/update the remote params.
+    remote_params = RemoteParams()
+    gcp_engine._set_required_fields_for_inference(remote_params)
+
+    expected_api_url = (
+        "https://test_region-aiplatform.googleapis.com/v1beta1/projects/"
+        "test_project_id/locations/test_region/endpoints/openapi/chat/completions"
+    )
+    assert remote_params.api_url == expected_api_url
+
+
+@patch("os.getenv")
+def test_setting_api_url_via_env_region_and_project_id_custom_keys(mock_getenv):
+    def mock_getenv_fn(key):
+        return {
+            "CUSTOM_PROJECT_ID_KEY": "test_project_id",
+            "CUSTOM_REGION_KEY": "test_region",
+        }.get(key)
+
+    mock_getenv.side_effect = mock_getenv_fn
+
+    gcp_engine = GoogleVertexInferenceEngine(
+        model_params=ModelParams(model_name="some_model"),
+        project_id_env_key="CUSTOM_PROJECT_ID_KEY",
+        region_env_key="CUSTOM_REGION_KEY",
+    )
+
+    # The method `_set_required_fields_for_inference` is called right before querying
+    # the remote API (with `_query_api`) to validate/update the remote params.
+    remote_params = RemoteParams()
+    gcp_engine._set_required_fields_for_inference(remote_params)
+
+    expected_api_url = (
+        "https://test_region-aiplatform.googleapis.com/v1beta1/projects/"
+        "test_project_id/locations/test_region/endpoints/openapi/chat/completions"
+    )
+    assert remote_params.api_url == expected_api_url
+
+
+def test_not_setting_api_url_failure():
+    gcp_engine = GoogleVertexInferenceEngine(
+        model_params=ModelParams(model_name="some_model"),
+    )
+
+    with pytest.raises(ValueError) as exception_info:
+        gcp_engine._set_required_fields_for_inference(RemoteParams())
+    assert str(exception_info.value) == (
+        "This inference engine requires that either `api_url` is set in `RemoteParams` "
+        "or that both `project_id` and `region` are set. You can set the `project_id` "
+        "and `region` when constructing a GoogleVertexInferenceEngine, or as "
+        "environment variables: `PROJECT_ID` and `REGION`."
+    )

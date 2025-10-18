@@ -1,9 +1,28 @@
+# Copyright 2025 - Oumi
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import collections
 from typing import Any, NamedTuple, Optional
 
 from oumi.core.tokenizers.base_tokenizer import BaseTokenizer
+from oumi.utils.debug_utils import log_example_for_debugging
 from oumi.utils.logging import logger
-from oumi.utils.torch_utils import create_ones_like, pad_sequences
+from oumi.utils.torch_utils import (
+    create_ones_like,
+    pad_sequences,
+    pad_to_max_dim_and_stack,
+)
 
 _INPUT_IDS_KEY = "input_ids"
 _ATTENTION_MASK_KEY = "attention_mask"
@@ -31,6 +50,8 @@ class TextCollatorWithPadding:
         max_length: Optional[int],
         truncation: bool = False,
         label_ignore_index: Optional[int] = None,
+        max_variable_sized_dims: int = 1,
+        debug: bool = False,
     ):
         """Custom collator for text LLM training.
 
@@ -42,6 +63,11 @@ class TextCollatorWithPadding:
             `max_length`. Only has effect if `max_length` is specified.
         label_ignore_index:  If set, then label values of tokens that shouldn't
             contribute to the loss computation will be replaced by this special value.
+        max_variable_sized_dims: Maximum number of variable-sized dimensions.
+            Normally, it's 1 (sequence length dimension), but can sometimes be higher
+            e.g., 2 for "cross_attention_mask" for VLM-s with multi-image inputs.
+            Negative value mean `Unlimited`.
+        debug: Whether to log a debug example.
         """
         self._max_length: Optional[int] = (
             int(max_length) if max_length is not None and max_length > 0 else None
@@ -67,6 +93,11 @@ class TextCollatorWithPadding:
 
         self._max_input_ids_length: int = 0
         self._max_previously_logged_input_ids_length: int = 0
+        self._max_variable_sized_dims: int = max_variable_sized_dims
+        self._debug: bool = debug
+        # Track if we've already logged an example
+        self._has_logged_example: bool = False
+        self._tokenizer = tokenizer  # Store tokenizer for debugging
 
     def _collate_simple(
         self,
@@ -76,22 +107,32 @@ class TextCollatorWithPadding:
         padding_value_overrides: dict[str, int],
     ) -> dict[str, Any]:
         result: dict[str, Any] = {}
-        try:
-            for key, sequences_list in inputs_dict.items():
+        for key, sequences_list in inputs_dict.items():
+            try:
                 padding_value = padding_value_overrides.get(key, 0)
-                result[key] = pad_sequences(
-                    sequences_list,
-                    padding_side=self._padding_side,
-                    padding_value=padding_value,
+                if self._max_variable_sized_dims == 1:
+                    collated_tensor = pad_sequences(
+                        sequences_list,
+                        padding_side=self._padding_side,
+                        padding_value=padding_value,
+                    )
+                else:
+                    collated_tensor = pad_to_max_dim_and_stack(
+                        sequences_list,
+                        max_variable_sized_dims=self._max_variable_sized_dims,
+                        padding_side=self._padding_side,
+                        padding_value=padding_value,
+                    )
+                result[key] = collated_tensor
+            except Exception:
+                logger.error(
+                    f"Failed to collate '{key}'!  "
+                    f"Max variable size dims: {self._max_variable_sized_dims}, "
+                    f"Batch maximum length: {batch_max_length}, "
+                    f"Maximum allowed length: {self._max_length}, "
+                    f"Truncation: {self._truncation}."
                 )
-        except Exception:
-            logger.error(
-                "Failed to collate using pad_sequences! "
-                f"Batch maximum length: {batch_max_length}. "
-                f"Maximum allowed length: {self._max_length}. "
-                f"Truncation: {self._truncation}."
-            )
-            raise
+                raise
         return result
 
     def __call__(self, batch) -> dict[str, Any]:
@@ -189,7 +230,66 @@ class TextCollatorWithPadding:
         if labels_on:
             combined_batch[_LABELS_KEY] = collated_text_inputs[_LABELS_KEY]
 
+        # If debug is on and we haven't logged an example yet, log the first example
+        if self._debug and not self._has_logged_example and len(batch) > 0:
+            # Log an example of the data in the first step for debugging purposes.
+            self._log_debug_example(batch, combined_batch)
+
         return combined_batch
+
+    def _log_debug_example(
+        self,
+        batch: list[dict[str, Any]],
+        combined_batch: dict[str, Any],
+    ) -> None:
+        """Logs a debug example if debug is enabled.
+
+        Args:
+            batch: The original batch of data.
+            combined_batch: The collated batch after processing.
+        """
+        first_input_ids = combined_batch[_INPUT_IDS_KEY][0]
+        formatted_example = self._tokenizer.decode(
+            first_input_ids, skip_special_tokens=False
+        )
+        # Decode raw text without special tokens for raw example
+        raw_text = self._tokenizer.decode(first_input_ids, skip_special_tokens=True)
+
+        tokenized_example = []
+        for tid in first_input_ids:
+            if hasattr(tid, "item"):
+                token_id = int(tid.item())
+                decoded_token = self._tokenizer.decode([tid])
+            else:
+                token_id = int(tid)
+                decoded_token = self._tokenizer.decode(tid)
+            tokenized_example.append((token_id, decoded_token))
+
+        model_input = {
+            "input_ids": (
+                first_input_ids.tolist()
+                if hasattr(first_input_ids, "tolist")
+                else first_input_ids
+            ),
+            "attention_mask": (
+                combined_batch[_ATTENTION_MASK_KEY][0].tolist()
+                if hasattr(combined_batch[_ATTENTION_MASK_KEY][0], "tolist")
+                else combined_batch[_ATTENTION_MASK_KEY][0]
+            ),
+        }
+
+        if _LABELS_KEY in combined_batch:
+            lbl = combined_batch[_LABELS_KEY][0]
+            model_input["labels"] = lbl.tolist() if hasattr(lbl, "tolist") else lbl
+
+        # Mark that we've logged an example to avoid logging again
+        self._has_logged_example = True
+        log_example_for_debugging(
+            raw_example=raw_text,
+            formatted_example=str(formatted_example),
+            tokenized_example=tokenized_example,
+            model_input=model_input,
+        )
 
     def _update_max_lengths_and_log(self, *, max_input_ids_length: int):
         """Updates max length counters.

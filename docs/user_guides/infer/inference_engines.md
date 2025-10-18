@@ -62,7 +62,7 @@ Each inference engine supports a different set of parameters (for example, diffe
 
 Make sure to check the {doc}`configuration` for an exhaustive list of supported parameters, and the reference page for the specific engine you are using to find the parameters it supports.
 
-For example, the supported parameters for the `VLLMInferenceEngine` can be found here {py:meth}`~oumi.inference.VLLMInferenceEngine.get_supported_params`.
+For example, the supported parameters for the `VLLMInferenceEngine` can be found in {py:meth}`~oumi.inference.VLLMInferenceEngine.get_supported_params`.
 
 ## Local Inference
 
@@ -112,6 +112,9 @@ First, make sure to install the vLLM package:
 
 ```bash
 pip install vllm
+# Alternatively, install all Oumi GPU dependencies, which takes care of installing a
+# vLLM version compatible with your current Oumi version.
+pip install oumi[gpu]
 ```
 
 **Basic Usage**
@@ -119,7 +122,7 @@ pip install vllm
 ```python
 engine = VLLMInferenceEngine(
     ModelParams(
-        model_name="meta-llama/Meta-Llama-3.1-8B-Instruct",
+        model_name="meta-llama/Llama-3.1-8B-Instruct",
     )
 )
 ```
@@ -221,7 +224,7 @@ model_params = ModelParams(
 
 ```bash
 python -m vllm.entrypoints.openai.api_server \
-    --model meta-llama/Meta-Llama-3.1-8B-Instruct \
+    --model meta-llama/Llama-3.1-8B-Instruct \
     --port 6864
 ```
 
@@ -229,7 +232,7 @@ python -m vllm.entrypoints.openai.api_server \
 
 ```bash
 python -m vllm.entrypoints.openai.api_server \
-    --model meta-llama/Meta-Llama-3.1-70B-Instruct \
+    --model meta-llama/Llama-3.3-70B-Instruct \
     --port 6864 \
     --tensor-parallel-size 4
 
@@ -243,7 +246,7 @@ The client can be configured with different reliability and performance options 
 # Basic client with timeout and retry settings
 engine = RemoteVLLMInferenceEngine(
     model_params=ModelParams(
-        model_name="meta-llama/Meta-Llama-3.1-8B-Instruct"
+        model_name="meta-llama/Llama-3.1-8B-Instruct"
     ),
     remote_params=RemoteParams(
         api_url="http://localhost:6864",
@@ -261,7 +264,7 @@ engine = RemoteVLLMInferenceEngine(
 
 ```bash
 python -m sglang.launch_server \
-    --model-path meta-llama/Meta-Llama-3.1-8B-Instruct \
+    --model-path meta-llama/Llama-3.1-8B-Instruct \
     --port 6864 \
     --disable-cuda-graph \
     --mem-fraction-static=0.99
@@ -276,7 +279,7 @@ The client can be configured with different reliability and performance options 
 ```{testcode}
 engine = SGLangInferenceEngine(
     model_params=ModelParams(
-        model_name="meta-llama/Meta-Llama-3.1-8B-Instruct"
+        model_name="meta-llama/Llama-3.1-8B-Instruct"
     ),
     remote_params=RemoteParams(
         api_url="http://localhost:6864"
@@ -479,6 +482,32 @@ engine = TogetherInferenceEngine(
 
 The models available via this API can be found at [together.ai](https://www.together.ai/).
 
+### Lambda Inference API
+
+[Lambda Inference API](https://lambda.ai) enables you to use large language models (LLMs) without the need to set up a server. No limits are placed on the rate of requests.
+
+**Basic Usage**
+
+```{testcode}
+from oumi.inference import LambdaInferenceEngine
+from oumi.core.configs import ModelParams, RemoteParams
+
+engine = LambdaInferenceEngine(
+    model_params=ModelParams(
+        model_name="llama-4-scout-17b-16e-instruct"
+    ),
+)
+```
+
+**Supported Models**
+
+The full list of models available via this API can be found at [docs.lambda.ai](https://docs.lambda.ai/public-cloud/lambda-inference-api/#listing-models).
+
+
+**Resources**
+
+- [Lambda AI API Documentation](https://docs.lambda.ai/public-cloud/lambda-inference-api)
+
 ### DeepSeek
 
 [DeepSeek](https://deepseek.com) allows to access the DeepSeek models (Chat, Code, and Reasoning) through the DeepSeek AI Platform.
@@ -508,6 +537,30 @@ The DeepSeek models available via this API as of late Jan'2025 are listed below.
 | DeepSeek-V3                           | deepseek-chat             |
 | DeepSeek-R1 (reasoning with CoT)      | deepseek-reasoner         |
 
+### SambaNova
+
+[SambaNova](https://www.sambanova.ai/) offers an extreme-speed inference platform on cloud infrastructure with wide variety of models.
+
+This service is particularly useful when you need to run open source models in a managed environment.
+
+**Basic Usage**
+
+```{testcode}
+from oumi.inference import SambanovaInferenceEngine
+from oumi.core.configs import ModelParams, RemoteParams
+
+engine = SambanovaInferenceEngine(
+    model_params=ModelParams(
+        model_name="Meta-Llama-3.1-405B-Instruct"
+    ),
+    remote_params=RemoteParams(
+        api_key_env_varname="SAMBANOVA_API_KEY",
+    )
+)
+```
+
+** Reference **
+- [SambaNova's Documentation](https://docs.sambanova.ai/cloud/docs/get-started/overview)
 
 ### Parasail.io
 

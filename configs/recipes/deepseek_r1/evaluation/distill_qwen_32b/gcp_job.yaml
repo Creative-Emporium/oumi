@@ -1,9 +1,18 @@
-# Class: oumi.core.configs.JobConfig
-# https://github.com/oumi-ai/oumi/blob/main/src/oumi/core/configs/job_config.py
+# Job config to eval Deepseek R1 Distill Qwen2.5 32B.
+#
+# Requirements:
+#   - Set up SkyPilot GCP: https://oumi.ai/docs/en/latest/user_guides/launch/launch.html#setup
+#   - Log into WandB (`wandb login`) or disable `enable_wandb`
+#
+# Usage:
+#   oumi launch up -c configs/recipes/deepseek_r1/evaluation/distill_qwen_32b/gcp_job.yaml --cluster deepseek-r1-qwen32b-eval
+#
+# See Also:
+#   - Documentation: https://oumi.ai/docs/en/latest/user_guides/launch/launch.html
+#   - Config class: oumi.core.configs.JobConfig
+#   - Config source: https://github.com/oumi-ai/oumi/blob/main/src/oumi/core/configs/job_config.py
+#   - Other job configs: configs/**/*job.yaml
 
-# Config to eval Deepseek R1 Distill Qwen2.5 32B.
-# Example command:
-# oumi launch up -c configs/recipes/deepseek_r1/evaluation/distill_qwen_32b/gcp_job.yaml --cluster deepseek-r1-qwen32b-eval
 name: deepseek-r1-distill-qwen32b-eval
 
 resources:
@@ -15,7 +24,7 @@ resources:
 working_dir: .
 
 file_mounts:
-  ~/.netrc: ~/.netrc  # WandB credentials
+  ~/.netrc: ~/.netrc # WandB credentials
 
 envs:
   # NOTE: For SFT, update this to point to your model checkpoint.
@@ -27,10 +36,10 @@ envs:
 
 setup: |
   set -e
-  pip install uv && uv pip install '.[gpu,evaluation]' hf_transfer
+  pip install uv && uv pip install oumi[gpu,evaluation] hf_transfer
   # Install model from HF Hub. This tool increases download speed compared to
   # downloading the model during eval.
-  HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli download deepseek-ai/DeepSeek-R1-Distill-Qwen-32B
+  HF_HUB_ENABLE_HF_TRANSFER=1 hf download deepseek-ai/DeepSeek-R1-Distill-Qwen-32B
 
 run: |
   set -e  # Exit if any command failed.

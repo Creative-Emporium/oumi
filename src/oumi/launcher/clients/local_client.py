@@ -1,3 +1,17 @@
+# Copyright 2025 - Oumi
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import os
 import time
 from dataclasses import dataclass
@@ -9,7 +23,7 @@ from threading import Lock, Thread
 from typing import Optional
 
 from oumi.core.configs import JobConfig
-from oumi.core.launcher import JobStatus
+from oumi.core.launcher import JobState, JobStatus
 
 
 @dataclass
@@ -50,11 +64,26 @@ class LocalClient:
         self._worker = Thread(target=self._worker_loop, daemon=True)
         self._worker.start()
 
+    def _get_job_state(self, job_state: _JobState) -> JobState:
+        """Gets the state of the job."""
+        if job_state == _JobState.QUEUED:
+            return JobState.PENDING
+        elif job_state == _JobState.RUNNING:
+            return JobState.RUNNING
+        elif job_state == _JobState.COMPLETED:
+            return JobState.SUCCEEDED
+        elif job_state == _JobState.FAILED:
+            return JobState.FAILED
+        elif job_state == _JobState.CANCELED:
+            return JobState.CANCELLED
+        raise ValueError(f"Invalid job state: {job_state}")
+
     def _update_job_status(self, job_id: str, status: _JobState) -> None:
         """Updates the status of the job. Assumes the mutex is already acquired."""
         if job_id not in self._jobs:
             return
         self._jobs[job_id].status.status = status.value
+        self._jobs[job_id].status.state = self._get_job_state(status)
         is_done = status in (_JobState.COMPLETED, _JobState.FAILED, _JobState.CANCELED)
         self._jobs[job_id].status.done = is_done
 
@@ -174,6 +203,7 @@ class LocalClient:
                 cluster="",
                 metadata="",
                 done=False,
+                state=JobState.PENDING,
             )
             self._jobs[job_id] = _LocalJob(status=status, config=job)
             return status

@@ -19,7 +19,7 @@ Oumi enables you to start small—in a notebook or local machine—and easily sc
 
 Key features include:
 
-- **Multiple Training Methods**: {ref}`Supervised Fine-Tuning (SFT) <supervised-fine-tuning-sft>` to adapt models to your specific tasks, {ref}`Vision-Language SFT <vision-language-sft>` for multimodal models, {ref}`Pretraining <pretraining>` for training from scratch, and {ref}`Direct Preference Optimization (DPO) <direct-preference-optimization-dpo>` for preference-based fine-tuning
+- **Multiple Training Methods**: {ref}`Supervised Fine-Tuning (SFT) <supervised-fine-tuning-sft>` to adapt models to your specific tasks, {ref}`Vision-Language SFT <vision-language-sft>` for multimodal models, {ref}`Pretraining <pretraining>` for training from scratch, {ref}`Direct Preference Optimization (DPO) <direct-preference-optimization-dpo>` for preference-based fine-tuning, and {ref}`Group Relative Policy Optimization (GRPO) <group-relative-policy-optimization-grpo>` for preference-based fine-tuning
 - **Parameter-Efficient Fine-Tuning (PEFT) & Full Fine-Tuning (FFT)**: Support for multiple [PEFT](#using-peft) methods including LoRA for efficient adapter training, QLoRA for quantized fine-tuning with 4-bit precision, and full fine-tuning for maximum performance
 - **Flexible Environments**: Train on {doc}`local machines <environments/local>`, with {doc}`VSCode integration <environments/vscode>`, in {doc}`Jupyter notebooks <environments/notebooks>`, or in a {doc}`cloud environment </user_guides/launch/launch>`
 - **Production-Ready**: Ensure reproducibility through {doc}`YAML-based configurations <configuration>` and gain insights with comprehensive {doc}`monitoring & debugging tools <monitoring>`
@@ -123,7 +123,7 @@ The simplest workflow is to fine-tune a pre-trained model on a dataset. The foll
 
 ```yaml
 model:
-  model_name: "meta-llama/Meta-Llama-3.2-3B-Instruct"  # Replace with your model
+  model_name: "meta-llama/Llama-3.2-3B-Instruct"  # Replace with your model
   trust_remote_code: true
   dtype: "bfloat16"
 
@@ -148,7 +148,7 @@ Excellent results can be achieved at a fraction of the computational cost by fin
 
 ```yaml
 model:
-  model_name: "meta-llama/Meta-Llama-3.2-3B-Instruct"  # Replace with your model
+  model_name: "meta-llama/Llama-3.2-3B-Instruct"  # Replace with your model
   trust_remote_code: true
   dtype: "bfloat16"
 

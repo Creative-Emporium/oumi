@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 import oumi
 import oumi.core.distributed
 import oumi.utils.torch_utils
+from oumi.cli.alias import AliasType
 from oumi.cli.cli_utils import CONTEXT_ALLOW_EXTRA_ARGS
 from oumi.cli.train import train
 from oumi.core.configs import (
@@ -50,6 +51,7 @@ def _create_training_config() -> TrainingConfig:
             log_model_summary=True,
             enable_wandb=False,
             enable_tensorboard=False,
+            enable_mlflow=False,
             try_resume_from_last_checkpoint=True,
             save_final_model=True,
         ),
@@ -68,7 +70,7 @@ def app():
 
 @pytest.fixture
 def mock_train():
-    with patch.object(oumi, "train", autospec=True) as m_train:
+    with patch.object(oumi, "train") as m_train:
         yield m_train
 
 
@@ -96,6 +98,18 @@ def mock_set_random_seeds():
         yield m_seeds
 
 
+@pytest.fixture
+def mock_fetch():
+    with patch("oumi.cli.cli_utils.resolve_and_fetch_config") as m_fetch:
+        yield m_fetch
+
+
+@pytest.fixture
+def mock_alias():
+    with patch("oumi.cli.train.try_get_config_name_for_alias") as try_alias:
+        yield try_alias
+
+
 def test_train_runs(
     app,
     mock_train,
@@ -109,9 +123,31 @@ def test_train_runs(
         config.to_yaml(train_yaml_path)
         _ = runner.invoke(app, ["--config", train_yaml_path, "--log-level", "ERROR"])
         mock_limit_per_process_memory.assert_called_once()
-        mock_train.assert_has_calls([call(config)])
+        mock_train.assert_has_calls([call(config, verbose=False)])
         mock_device_cleanup.assert_has_calls([call(), call()])
         mock_set_random_seeds.assert_called_once()
+        assert logger.level == logging.ERROR
+
+
+def test_train_with_alias_runs(
+    app,
+    mock_train,
+    mock_limit_per_process_memory,
+    mock_device_cleanup,
+    mock_set_random_seeds,
+    mock_alias,
+):
+    with tempfile.TemporaryDirectory() as output_temp_dir:
+        train_yaml_path = str(Path(output_temp_dir) / "train.yaml")
+        mock_alias.return_value = train_yaml_path
+        config: TrainingConfig = _create_training_config()
+        config.to_yaml(train_yaml_path)
+        _ = runner.invoke(app, ["--config", "random_alias", "--log-level", "ERROR"])
+        mock_limit_per_process_memory.assert_called_once()
+        mock_train.assert_has_calls([call(config, verbose=False)])
+        mock_device_cleanup.assert_has_calls([call(), call()])
+        mock_set_random_seeds.assert_called_once()
+        mock_alias.assert_called_once_with("random_alias", AliasType.TRAIN)
         assert logger.level == logging.ERROR
 
 
@@ -141,6 +177,59 @@ def test_train_with_overrides(
         expected_config = _create_training_config()
         expected_config.model.tokenizer_name = "new_name"
         expected_config.training.max_steps = 5
-        mock_train.assert_has_calls([call(expected_config)])
+        mock_train.assert_has_calls([call(expected_config, verbose=False)])
         mock_device_cleanup.assert_has_calls([call(), call()])
         mock_set_random_seeds.assert_called_once()
+
+
+def test_train_runs_with_oumi_prefix(
+    app,
+    mock_train,
+    mock_limit_per_process_memory,
+    mock_device_cleanup,
+    mock_set_random_seeds,
+    mock_fetch,
+):
+    with tempfile.TemporaryDirectory() as output_temp_dir:
+        output_dir = Path(output_temp_dir)
+        train_yaml_path = "oumi://configs/recipes/smollm/sft/135m/train.yaml"
+        expected_path = output_dir / "configs/recipes/smollm/sft/135m/train.yaml"
+
+        config: TrainingConfig = _create_training_config()
+        expected_path.parent.mkdir(parents=True, exist_ok=True)
+        config.to_yaml(expected_path)
+        mock_fetch.return_value = expected_path
+
+        with patch.dict("os.environ", {"OUMI_DIR": str(output_dir)}):
+            result = runner.invoke(
+                app, ["--config", train_yaml_path, "--log-level", "ERROR"]
+            )
+
+        assert result.exit_code == 0
+        mock_fetch.assert_called_once_with(train_yaml_path)
+
+        mock_limit_per_process_memory.assert_called_once()
+        mock_train.assert_has_calls([call(config, verbose=False)])
+        mock_device_cleanup.assert_has_calls([call(), call()])
+        mock_set_random_seeds.assert_called_once()
+        assert logger.level == logging.ERROR
+
+
+def test_train_with_verbose_flag(
+    app,
+    mock_train,
+    mock_limit_per_process_memory,
+    mock_device_cleanup,
+    mock_set_random_seeds,
+):
+    """Test that verbose flag is properly passed through to train function."""
+    with tempfile.TemporaryDirectory() as output_temp_dir:
+        train_yaml_path = str(Path(output_temp_dir) / "train.yaml")
+        config: TrainingConfig = _create_training_config()
+        config.to_yaml(train_yaml_path)
+
+        # Test with --verbose
+        result = runner.invoke(app, ["--config", train_yaml_path, "--verbose"])
+
+        assert result.exit_code == 0
+        mock_train.assert_called_once_with(config, verbose=True)
