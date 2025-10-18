@@ -1,7 +1,13 @@
-# Class: oumi.core.configs.TrainingConfig
-# https://github.com/oumi-ai/oumi/blob/main/src/oumi/core/configs/training_config.py
-
-# SFT config for SmolLM 135M Instruct.
+# FFT config for SmolLM 135M Instruct.
+#
+# Usage:
+#   oumi train -c configs/recipes/smollm/sft/135m/quickstart_train.yaml
+#
+# See Also:
+#   - Documentation: https://oumi.ai/docs/en/latest/user_guides/train/train.html
+#   - Config class: oumi.core.configs.TrainingConfig
+#   - Config source: https://github.com/oumi-ai/oumi/blob/main/src/oumi/core/configs/training_config.py
+#   - Other training configs: configs/**/*train.yaml
 
 model:
   model_name: "HuggingFaceTB/SmolLM2-135M-Instruct"
@@ -33,8 +39,12 @@ training:
   dataloader_num_workers: "auto"
   dataloader_prefetch_factor: 32
 
+  seed: 192847
+  use_deterministic: True
+
   logging_steps: 5
   log_model_summary: False
   empty_device_cache_steps: 50
+  run_name: "smollm135m.fft.quickstart"
   output_dir: "output/smollm135m.fft"
   include_performance_metrics: True

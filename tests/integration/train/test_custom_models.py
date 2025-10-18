@@ -1,5 +1,4 @@
 import tempfile
-import unittest
 
 from transformers import Trainer
 
@@ -31,9 +30,8 @@ def _get_default_config(output_temp_dir):
             train=DatasetSplitParams(
                 datasets=[
                     DatasetParams(
-                        dataset_name="Salesforce/wikitext",
-                        subset="wikitext-2-raw-v1",
-                        dataset_kwargs={"seq_length": 128},
+                        dataset_name="debug_pretraining",
+                        dataset_kwargs={"dataset_size": 25, "seq_length": 128},
                     )
                 ],
                 stream=True,
@@ -58,6 +56,7 @@ def _get_default_config(output_temp_dir):
             logging_steps=1,
             enable_wandb=False,
             enable_tensorboard=False,
+            enable_mlflow=False,
             output_dir=output_temp_dir,
             include_performance_metrics=False,
             include_alternative_mfu_metrics=True,
@@ -74,7 +73,12 @@ def test_train_native_pt_model_from_api():
 
         tokenizer = build_tokenizer(config.model)
 
-        dataset = build_dataset_mixture(config, tokenizer, DatasetSplit.TRAIN)
+        dataset = build_dataset_mixture(
+            config.data,
+            tokenizer,
+            DatasetSplit.TRAIN,
+            seq_length=config.model.model_max_length,
+        )
 
         model = build_model(model_params=config.model)
 
@@ -82,7 +86,7 @@ def test_train_native_pt_model_from_api():
 
         trainer = Trainer(
             model=model,
-            tokenizer=tokenizer,
+            processing_class=tokenizer,
             args=training_args,
             train_dataset=dataset,
         )
@@ -90,7 +94,6 @@ def test_train_native_pt_model_from_api():
         trainer.train()
 
 
-@unittest.skip("Temporarily disabled. Failing potentially due to network timeout")
 def test_train_native_pt_model_from_config():
     with tempfile.TemporaryDirectory() as output_temp_dir:
         config = _get_default_config(output_temp_dir)

@@ -1,6 +1,21 @@
-import pathlib
-from typing import Optional
+# Copyright 2025 - Oumi
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
+import pathlib
+from typing import Optional, cast
+
+import peft
 import transformers
 
 from oumi.core.configs import TrainingConfig
@@ -54,7 +69,11 @@ class HuggingFaceTrainer(BaseTrainer):
         if self._hf_trainer.is_fsdp_enabled:
             # FSDP is enabled, so we need to save the model in a special way.
             return self._save_fsdp_model(config=config, final=final)
+        else:
+            return self._save_model(config=config, final=final)
 
+    def _save_model(self, config: TrainingConfig, final: bool = True) -> None:
+        """Saves the model's weights to the specified output directory."""
         if not is_world_process_zero():
             return
 
@@ -84,9 +103,9 @@ class HuggingFaceTrainer(BaseTrainer):
                             "attempting to delete during model saving."
                         )
 
-                merged_model = self._hf_trainer.model.merge_and_unload(
-                    progressbar=True, safe_merge=True
-                )
+                model = cast(peft.LoraModel, self._hf_trainer.model)
+                merged_model = model.merge_and_unload(progressbar=True, safe_merge=True)
+                merged_model = cast(transformers.PreTrainedModel, merged_model)
                 merged_model.save_pretrained(output_dir)
             elif config.peft.peft_save_mode == PeftSaveMode.ADAPTER_ONLY:
                 # Save the LoRA adapter (doesn't include the base model).
@@ -94,7 +113,13 @@ class HuggingFaceTrainer(BaseTrainer):
             elif config.peft.peft_save_mode == PeftSaveMode.ADAPTER_AND_BASE_MODEL:
                 self._hf_trainer.save_model(output_dir)
                 # Saving the base model requires a separate call.
-                self._hf_trainer.model.base_model.save_pretrained(output_dir)
+                assert self._hf_trainer.model is not None, (
+                    "Model should not be None when using PEFT"
+                )
+                model = cast(
+                    transformers.PreTrainedModel, self._hf_trainer.model.base_model
+                )
+                model.save_pretrained(output_dir)
             else:
                 raise ValueError(
                     f"Unsupported PEFT save mode: {config.peft.peft_save_mode}"
@@ -125,3 +150,7 @@ class HuggingFaceTrainer(BaseTrainer):
         output_dir = config.training.output_dir
         self._hf_trainer.save_model(output_dir)
         logger.info(f"Model has been saved at {output_dir}")
+
+        if self._processor is not None:
+            self._processor.save_config(output_dir)
+            logger.info(f"Processor config has been saved at {output_dir}")

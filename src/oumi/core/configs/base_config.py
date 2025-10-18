@@ -1,3 +1,17 @@
+# Copyright 2025 - Oumi
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import dataclasses
 import logging
 import re
@@ -72,6 +86,23 @@ class BaseConfig:
         return cast(T, config)
 
     @classmethod
+    def from_str(cls: type[T], config_str: str) -> T:
+        """Loads a configuration from a YAML string.
+
+        Args:
+            config_str: The YAML string.
+
+        Returns:
+            BaseConfig: The configuration object.
+        """
+        schema = OmegaConf.structured(cls)
+        file_config = OmegaConf.create(config_str)
+        config = OmegaConf.to_object(OmegaConf.merge(schema, file_config))
+        if not isinstance(config, cls):
+            raise TypeError(f"config is not {cls}")
+        return cast(T, config)
+
+    @classmethod
     def from_yaml_and_arg_list(
         cls: type[T],
         config_path: Optional[str],
@@ -106,17 +137,34 @@ class BaseConfig:
             else:
                 all_configs.append(cls.from_yaml(config_path))
 
-        # Filter out CLI arguments that should be ignored.
-        arg_list = _filter_ignored_args(arg_list)
-
-        # Override with CLI arguments.
-        all_configs.append(OmegaConf.from_cli(arg_list))
+        # Merge base config and config from yaml.
         try:
             # Merge and validate configs
             config = OmegaConf.merge(*all_configs)
         except Exception:
             if logger:
-                logger.exception(f"Failed to merge Omega configs: {all_configs}")
+                configs_str = "\n\n".join([f"{config}" for config in all_configs])
+                logger.exception(
+                    f"Failed to merge {len(all_configs)} Omega configs:\n{configs_str}"
+                )
+            raise
+
+        # Override config with CLI arguments, in order. The arguments, aka flag names,
+        # are dot-separated arguments, ex. `model.model_name`. This also supports
+        # arguments indexing into lists, ex. `tasks[0].num_samples` or
+        # `tasks.0.num_samples`. This is because the config is already populated and
+        # typed, so the indexing is properly interpreted as a list index as opposed to
+        # a dictionary key.
+        try:
+            # Filter out CLI arguments that should be ignored.
+            arg_list = _filter_ignored_args(arg_list)
+            # Override with CLI arguments.
+            config.merge_with_dotlist(arg_list)
+        except Exception:
+            if logger:
+                logger.exception(
+                    f"Failed to merge arglist {arg_list} with Omega config:\n{config}"
+                )
             raise
 
         config = OmegaConf.to_object(config)
@@ -124,6 +172,18 @@ class BaseConfig:
             raise TypeError(f"config {type(config)} is not {type(cls)}")
 
         return cast(T, config)
+
+    def print_config(self, logger: Optional[logging.Logger] = None) -> None:
+        """Prints the configuration in a human-readable format.
+
+        Args:
+            logger: Optional logger to use. If None, uses module logger.
+        """
+        if logger is None:
+            logger = logging.getLogger(__name__)
+
+        config_yaml = OmegaConf.to_yaml(self, resolve=True)
+        logger.info(f"Configuration:\n{config_yaml}")
 
     def finalize_and_validate(self) -> None:
         """Finalizes and validates the top level params objects."""

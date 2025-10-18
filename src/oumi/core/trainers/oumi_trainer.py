@@ -1,5 +1,20 @@
+# Copyright 2025 - Oumi
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import contextlib
 import copy
+import math
 import os
 import time
 from contextlib import contextmanager
@@ -7,14 +22,14 @@ from pathlib import Path
 from pprint import pformat
 from typing import Any, Callable, Optional, cast
 
+import mlflow
 import pydantic
 import safetensors.torch
 import torch
 import torch.amp
 import torch.distributed.checkpoint as dcp
 import torch.utils.tensorboard as tensorboard
-
-import wandb  # isort: skip
+import wandb
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     get_state_dict,
@@ -37,19 +52,10 @@ from oumi.core.distributed import (
 from oumi.core.processors.base_processor import BaseProcessor
 from oumi.core.tokenizers import BaseTokenizer
 from oumi.core.trainers.base_trainer import BaseTrainer
-from oumi.models.layers.ring_attention import (
-    apply_zigzag_ring_attn_monkey_patch_llama as apply_ring_attention_monkey_patch,
-)
-from oumi.models.layers.ring_attention import (
-    prepare_zigzag_ring_attn_inputs as prepare_seq_parallel_inputs,
-)
 from oumi.performance.telemetry import TelemetryTracker
 from oumi.utils.io_utils import load_json, save_json
 from oumi.utils.logging import logger
-from oumi.utils.torch_utils import log_trainable_parameters
-
-torch.backends.cuda.matmul.allow_tf32 = True  # allow tf32 on matmul
-torch.backends.cudnn.allow_tf32 = True  # allow tf32 on cudnn
+from oumi.utils.serialization_utils import flatten_config
 
 
 class TrainingState(pydantic.BaseModel):
@@ -62,7 +68,7 @@ class Trainer(BaseTrainer):
     def __init__(
         self,
         model: torch.nn.Module,
-        tokenizer: BaseTokenizer,
+        processing_class: Optional[BaseTokenizer],
         args: TrainingParams,
         train_dataset: Dataset,
         processor: Optional[BaseProcessor] = None,
@@ -77,11 +83,14 @@ class Trainer(BaseTrainer):
         from oumi.builders.lr_schedules import build_lr_scheduler
         from oumi.builders.optimizers import build_optimizer
 
+        torch.backends.cuda.matmul.allow_tf32 = True  # allow tf32 on matmul
+        torch.backends.cudnn.allow_tf32 = True  # allow tf32 on cudnn
+
         self.telemetry = TelemetryTracker()
         self.start_time = time.perf_counter()
         self.collator_fn = data_collator
 
-        self.tokenizer = tokenizer
+        self.processing_class = processing_class
         self._processor = processor
         self.params = copy.deepcopy(args)
         self.train_dataset = train_dataset
@@ -98,6 +107,12 @@ class Trainer(BaseTrainer):
         # 2. CUDA and distributed multi-GPU training (otherwise, pointless).
         # 3. Supported model type.
         self.is_using_ring_attention = False
+        self._mlflow_oumi_managed_run = (
+            # If the user has manually started an mlflow run, we don't need to start
+            # a new one and can let the user manage it themselves.
+            # Otherwise, we start a new run and end it when training is done.
+            self.params.enable_mlflow and not mlflow.active_run()
+        )
 
         self.params.finalize_and_validate()
 
@@ -144,7 +159,12 @@ class Trainer(BaseTrainer):
         # Prepare model for training
         # ----------------------------------
         if args.enable_gradient_checkpointing:
-            model.gradient_checkpointing_enable(args.gradient_checkpointing_kwargs)
+            if not hasattr(model, "gradient_checkpointing_enable"):
+                raise ValueError(
+                    "Gradient checkpointing is only supported for Hugging Face models."
+                )
+            model.gradient_checkpointing_enable(args.gradient_checkpointing_kwargs)  # type: ignore
+        model = cast(torch.nn.Module, model)
         model.to(self.device)
         if is_distributed():
             # Wrap model for distributed training
@@ -154,9 +174,6 @@ class Trainer(BaseTrainer):
                     self.config,
                     ddp_find_unused_parameters=self.params.ddp_find_unused_parameters,
                 )
-                # Apply ring attention monkey patch if enabled
-                if self.is_using_ring_attention:
-                    apply_ring_attention_monkey_patch()
 
         if self.params.compile:
             self.log("Compiling model...")
@@ -171,7 +188,7 @@ class Trainer(BaseTrainer):
             optimizer=self.optimizer,
             training_params=self.params,
             current_epoch=self.state.epoch,
-            num_training_steps=self._get_total_training_steps(),
+            num_training_steps=self._estimate_total_training_steps(),
         )
 
         self.train_dataloader = self._get_train_dataloader()
@@ -187,11 +204,11 @@ class Trainer(BaseTrainer):
         if resume_from_checkpoint:
             with torch.profiler.record_function("load_from_checkpoint"):
                 self._load_from_checkpoint(resume_from_checkpoint)
+        else:
+            # Log training config and parameters to all enabled platforms
+            self._log_training_config()
 
-        if is_local_process_zero():
-            log_trainable_parameters(self.model)
-
-        total_steps = self._get_total_training_steps()
+        total_steps = self._estimate_total_training_steps()
 
         self.start_time = time.perf_counter()
 
@@ -203,7 +220,22 @@ class Trainer(BaseTrainer):
             desc="Training",
             disable=not is_world_process_zero(),
         ) as progress_bar:
-            for epoch in range(self.state.epoch, self.params.num_train_epochs):
+            while True:
+                epoch = self.state.epoch
+                if self.params.max_steps > 0:
+                    if self.state.global_step >= self.params.max_steps:
+                        self.log(
+                            f"Reached {self.state.global_step} global steps. "
+                            "Training completed."
+                        )
+                        break
+                elif (
+                    self.params.num_train_epochs > 0
+                    and epoch >= self.params.num_train_epochs
+                ):
+                    self.log(f"Reached {epoch} epochs. Training completed.")
+                    break
+
                 with torch.profiler.record_function(f"epoch_{epoch}"):
                     self._set_sampler_epoch(epoch)
                     self._train_epoch(progress_bar)
@@ -225,18 +257,15 @@ class Trainer(BaseTrainer):
 
                     barrier()
 
-                    if self.state.global_step >= total_steps:
-                        self.log(
-                            f"Reached {total_steps} global steps. Training completed."
-                        )
-                        break
-
             self._process_callbacks("on_train_end")
 
         self.log(
             f"Training finished! Global step: {self.state.global_step} "
             f"Training runtime: {time.perf_counter() - self.start_time}s"
         )
+
+        if self.params.enable_mlflow and not self._mlflow_oumi_managed_run:
+            mlflow.end_run()
 
     @contextmanager
     def _telemetry_block(self, name: str):
@@ -293,13 +322,17 @@ class Trainer(BaseTrainer):
 
                 # Count tokens on CPU.
                 with self._telemetry_block("computing tokens"):
-                    num_tokens = (
-                        batch["input_ids"].ne(self.tokenizer.pad_token_id).sum().item()
-                    )
-                    self.state.total_tokens_seen += num_tokens
+                    if self.processing_class is not None and "input_ids" in batch:
+                        num_tokens = (
+                            batch["input_ids"]
+                            .ne(self.processing_class.pad_token_id)
+                            .sum()
+                            .item()
+                        )
+                        self.state.total_tokens_seen += num_tokens
 
                 with self._telemetry_block("moving batch to device"):
-                    if not self.is_using_fsdp and not self.is_using_ring_attention:
+                    if not self.is_using_fsdp:
                         batch = {
                             k: v.to(self.device, non_blocking=True)
                             for k, v in batch.items()
@@ -310,19 +343,7 @@ class Trainer(BaseTrainer):
                         end_of_global_step or stop_on_max_steps_limit
                     )
 
-                    if self.is_using_ring_attention:
-                        # Prepare inputs for ring attention
-                        prepared_inputs = prepare_seq_parallel_inputs(
-                            batch["input_ids"],
-                            batch.get("position_ids"),
-                            batch.get("labels"),
-                            get_device_rank_info().rank,
-                            get_device_rank_info().world_size,
-                            self.device,
-                        )
-                        outputs = self.model(**prepared_inputs)
-                    else:
-                        outputs = self.model(**batch)
+                    outputs = self.model(**batch)
 
                     loss = outputs["loss"] / gradient_accumulation_steps
 
@@ -605,6 +626,10 @@ class Trainer(BaseTrainer):
             for key, value in metrics.items():
                 self.tensorboard_writer.add_scalar(key, value, self.state.global_step)
 
+        # Log to mlflow
+        if self.params.enable_mlflow:
+            mlflow.log_metrics(metrics, step=self.state.global_step)
+
     def _init_logging(
         self,
     ) -> None:
@@ -631,6 +656,46 @@ class Trainer(BaseTrainer):
             )
         else:
             self.tensorboard_writer = None
+
+        if self.params.enable_mlflow and self._mlflow_oumi_managed_run:
+            self.mlflow_run = mlflow.start_run(run_name=self.params.run_name)
+
+    def _log_training_config(self) -> None:
+        """Logs training configuration and parameters to all enabled platforms."""
+        if not is_world_process_zero() or not self.config:
+            return
+
+        # Get flattened config from both training config and parameters
+        config_dict = flatten_config(self.config)
+
+        # Log to MLflow
+        if self.params.enable_mlflow:
+            try:
+                mlflow.log_params(config_dict)
+            except Exception as e:
+                self.log(f"Failed to log config to MLflow: {e}")
+
+        # Log to Weights & Biases
+        if self.params.enable_wandb:
+            try:
+                # wandb.config can handle nested dictionaries, but we'll use
+                # flattened for consistency
+                wandb.config.update(config_dict)
+            except Exception as e:
+                self.log(f"Failed to log config to wandb: {e}")
+
+        # Log to TensorBoard
+        if self.params.enable_tensorboard and self.tensorboard_writer:
+            try:
+                # Log config as a formatted text to tensorboard
+                config_text = "\n".join([f"{k}: {v}" for k, v in config_dict.items()])
+                self.tensorboard_writer.add_text(
+                    tag="config/training_config",
+                    text_string=config_text,
+                    global_step=self.state.global_step,
+                )
+            except Exception as e:
+                self.log(f"Failed to log config to TensorBoard: {e}")
 
     #
     # Data loading
@@ -706,9 +771,38 @@ class Trainer(BaseTrainer):
             collate_fn=self.collator_fn,
         )
 
-    def _get_total_training_steps(self) -> int:
-        # TODO: handle num_epochs, len(dataset), etc
-        return self.params.max_steps
+    def _estimate_total_training_steps(self) -> int:
+        # If max_steps is set, use it.
+        if self.params.max_steps > 0:
+            return self.params.max_steps
+
+        num_epochs = self.params.num_train_epochs
+        if num_epochs > 0:
+            num_dataset_examples = 0
+            try:
+                if not isinstance(self.train_dataset, IterableDataset):
+                    num_dataset_examples = len(self.train_dataset)  # type: ignore
+                elif hasattr(self.train_dataset, "datapipe"):
+                    # Hacky way to get examples count from
+                    # MapToIterConverterIterDataPipe.
+                    # FIXME Remove DataPipes OPE-811
+                    num_dataset_examples = len(self.train_dataset.datapipe)  # type: ignore
+            except Exception:
+                num_dataset_examples = 0
+
+            if num_dataset_examples > 0:
+                world_size = get_device_rank_info().world_size
+                batch_size = self.params.per_device_train_batch_size
+                steps_per_epoch_per_device = math.ceil(
+                    float(num_dataset_examples) / (batch_size * world_size)
+                )
+                return int(num_epochs * max(steps_per_epoch_per_device, 1))
+
+        raise ValueError(
+            "Unable to estimate `total_training_steps` "
+            + (f"in {num_epochs} epochs" if num_epochs > 0 else "")
+            + ". Please define `max_steps` training parameter!"
+        )
 
     def _set_sampler_epoch(self, epoch: int) -> None:
         """Sets the current epoch on sampler, if it exists and supports it."""

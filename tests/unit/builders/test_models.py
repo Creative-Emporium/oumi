@@ -1,3 +1,4 @@
+from typing import Optional
 from unittest.mock import Mock, patch
 
 import pytest
@@ -7,10 +8,13 @@ from oumi.builders.models import (
     _get_model_type,
     _patch_model_for_liger_kernel,
     build_chat_template,
+    build_huggingface_model,
     build_tokenizer,
     is_image_text_llm,
 )
 from oumi.core.configs import ModelParams
+from oumi.core.configs.internal.supported_models import find_model_hf_config
+from oumi.utils.logging import logger
 
 
 @pytest.fixture
@@ -126,11 +130,13 @@ def test_build_chat_template_removes_indentation_and_newlines():
     "model_name, trust_remote_code, expected_result",
     [
         ("MlpEncoder", False, False),  # Custom model
+        ("CnnClassifier", False, False),  # Custom model
         ("openai-community/gpt2", False, False),
+        ("HuggingFaceTB/SmolLM2-135M-Instruct", False, False),
         ("llava-hf/llava-1.5-7b-hf", False, True),
         ("Salesforce/blip2-opt-2.7b", False, True),
         ("microsoft/Phi-3-vision-128k-instruct", True, True),
-        # ("HuggingFaceTB/SmolVLM-Instruct", False, True), # requires transformers>=4.46
+        ("HuggingFaceTB/SmolVLM-Instruct", False, True),
     ],
 )
 def test_is_image_text_llm(
@@ -145,18 +151,142 @@ def test_is_image_text_llm(
 
 
 @pytest.mark.parametrize(
-    "model_name, trust_remote_code, template_name",
+    "model_name, trust_remote_code, template_name, expected_padding_side",
     [
-        ("openai-community/gpt2", False, "gpt2"),
-        ("llava-hf/llava-1.5-7b-hf", False, "llava"),
-        ("microsoft/Phi-3-vision-128k-instruct", True, "phi3-instruct"),
+        ("openai-community/gpt2", False, "gpt2", "right"),
+        ("HuggingFaceTB/SmolLM2-135M-Instruct", False, None, "right"),
+        ("llava-hf/llava-1.5-7b-hf", False, "llava", "left"),
+        ("microsoft/Phi-3-vision-128k-instruct", True, "phi3-instruct", "right"),
+        ("Qwen/Qwen2-VL-2B-Instruct", True, "qwen2-vl-instruct", "left"),
+        # These models require allowlisting:
+        # ("meta-llama/Llama-3.2-3B-Instruct", False, None, "right"),
     ],
 )
 def test_default_chat_template_in_build_tokenizer(
-    model_name: str, trust_remote_code: bool, template_name: str
+    model_name: str,
+    trust_remote_code: bool,
+    template_name: Optional[str],
+    expected_padding_side: str,
 ):
     tokenizer = build_tokenizer(
         ModelParams(model_name=model_name, trust_remote_code=trust_remote_code)
     )
-    expected = build_chat_template(template_name=template_name)
-    assert tokenizer.chat_template == expected, f"template_name: {template_name}"
+
+    debug_tag = f"template_name: {template_name} model_name: {model_name}"
+    if template_name:
+        expected = build_chat_template(template_name=template_name)
+        if tokenizer.chat_template != expected:
+            logger.info(
+                f"Tokenizer chat template:\n\n{tokenizer.chat_template}\n\n"
+                f"Expected chat template:\n\n{expected}\n\n"
+            )
+        assert tokenizer.chat_template == expected, debug_tag
+    else:
+        # Using the model's built-in config.
+        assert tokenizer.chat_template is not None, (
+            f"Unspecified built-in template: {debug_tag}"
+        )
+        assert len(tokenizer.chat_template) > 0, f"Empty built-in template: {debug_tag}"
+
+    # Also check padding side here.
+    assert hasattr(tokenizer, "padding_side")
+    assert tokenizer.padding_side == expected_padding_side
+
+
+def test_find_model_hf_config_with_custom_kwargs():
+    mock_config = Mock()
+    mock_config.model_type = "test_model"
+
+    custom_kwargs = {
+        "max_position_embeddings": 2048,
+    }
+
+    with patch(
+        "oumi.core.configs.internal.supported_models.transformers.AutoConfig.from_pretrained"
+    ) as mock_from_pretrained:
+        mock_from_pretrained.return_value = (mock_config, {})
+
+        result = find_model_hf_config(
+            model_name="test-model",
+            trust_remote_code=False,
+            revision="main",
+            **custom_kwargs,
+        )
+
+        # Verify the result
+        assert result == mock_config
+
+        # Verify AutoConfig.from_pretrained was called with custom kwargs
+        mock_from_pretrained.assert_called_once_with(
+            "test-model",
+            trust_remote_code=False,
+            return_unused_kwargs=True,
+            revision="main",
+            **custom_kwargs,
+        )
+
+
+def test_find_model_hf_config_logs_unused_kwargs():
+    """Test that find_model_hf_config logs a warning for unused kwargs."""
+    mock_config = Mock()
+    mock_config.model_type = "test_model"
+    unused_kwargs = {"unsupported_param": "value"}
+
+    with (
+        patch(
+            "oumi.core.configs.internal.supported_models.transformers.AutoConfig.from_pretrained"
+        ) as mock_from_pretrained,
+        patch("oumi.core.configs.internal.supported_models.logger") as mock_logger,
+    ):
+        mock_from_pretrained.return_value = (mock_config, unused_kwargs)
+
+        find_model_hf_config(
+            model_name="test-model",
+            trust_remote_code=False,
+            unsupported_param="value",
+        )
+
+        # Verify warning was logged
+        mock_logger.warning.assert_called_once_with(
+            f"Unused kwargs found in 'test-model' config: {unused_kwargs}."
+        )
+
+
+def test_build_huggingface_model_passes_model_kwargs_to_find_model_hf_config():
+    """Test that build_huggingface_model passes model_kwargs to find_model_hf_config."""
+    model_kwargs = {
+        "max_position_embeddings": 2048,
+    }
+
+    model_params = ModelParams(
+        model_name="test-model", trust_remote_code=False, model_kwargs=model_kwargs
+    )
+
+    mock_config = Mock()
+    mock_config.model_type = "llama"
+    mock_config.use_cache = True
+
+    mock_model = Mock()
+    mock_model.config = mock_config
+
+    with (
+        patch("oumi.builders.models.find_model_hf_config") as mock_find_config,
+        patch("oumi.builders.models._get_transformers_model_class") as mock_get_class,
+        patch("oumi.builders.models.get_device_rank_info") as mock_device_info,
+        patch("oumi.builders.models.is_using_accelerate_fsdp", return_value=False),
+    ):
+        mock_find_config.return_value = mock_config
+        mock_model_class = Mock()
+        mock_model_class.from_pretrained.return_value = mock_model
+        mock_get_class.return_value = mock_model_class
+        mock_device_info.return_value = Mock(world_size=1, local_rank=0)
+
+        result = build_huggingface_model(model_params)
+
+        # Verify find_model_hf_config was called with model_kwargs
+        mock_find_config.assert_called_once_with(
+            "test-model", trust_remote_code=False, revision=None, **model_kwargs
+        )
+
+        # Verify the model was built successfully
+        assert result == mock_model

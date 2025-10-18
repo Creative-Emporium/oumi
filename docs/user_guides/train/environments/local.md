@@ -2,7 +2,7 @@
 
 This guide covers how to train models on your local machine or server using Oumi's command-line interface. Whether you're working on a laptop or a multi-GPU server, this guide will help you get started with local training.
 
-For cloud-based training options, see {doc}`/user_guides/train/environments/cloud`.
+For cloud-based training options, see {doc}`/user_guides/launch/launch`.
 
 ## Prerequisites
 
@@ -35,7 +35,6 @@ oumi train -c path/to/config.yaml \
 ```
 
 For a complete reference of configuration options, see {doc}`/user_guides/train/configuration`.
-
 
 ## Training with GPUs
 
@@ -85,6 +84,7 @@ oumi train -c config.yaml --training.logging_steps 10
 Monitor metrics with TensorBoard for rich visualizations:
 
 First add the following to your `train.yaml` config file:
+
 ```yaml
 training:
   enable_tensorboard: true
@@ -93,6 +93,7 @@ training:
 ```
 
 Then run the following command to start TensorBoard:
+
 ```bash
 # Start TensorBoard
 tensorboard --logdir oumi_output_dir
@@ -100,7 +101,8 @@ tensorboard --logdir oumi_output_dir
 
 ### Weights & Biases
 
-You can also track experiments with W&B for collaborative projects:
+You can also track experiments with W&B for collaborative projects. Make sure to [set up](https://oumi.ai/docs/latest/development/dev_setup.html#optional-set-up-weights-and-biases)
+W&B on your local machine first.
 
 ```yaml
 training:
@@ -115,3 +117,4 @@ For more monitoring options and best practices, see {doc}`/user_guides/train/mon
 
 - Set up {doc}`monitoring tools </user_guides/train/monitoring>` for tracking progress
 - Check out {doc}`configuration options </user_guides/train/configuration>` for detailed settings
+- Seamlessly scale up your job to run on {doc}`cloud clusters </user_guides/launch/launch>`

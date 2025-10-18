@@ -18,7 +18,7 @@ from oumi.core.types.conversation import Conversation, Message, Role
 # Initialize engine
 engine = VLLMInferenceEngine(
     model_params=ModelParams(
-        model_name="meta-llama/Meta-Llama-3.1-8B-Instruct",
+        model_name="meta-llama/Llama-3.1-8B-Instruct",
         torch_dtype="bfloat16"
     )
 )
@@ -39,7 +39,7 @@ config = InferenceConfig(
 )
 
 # Get model response
-result = engine.infer_online([conversation], config)
+result = engine.infer([conversation], config)
 print(result[0].messages[-1].content)
 ```
 
@@ -52,10 +52,10 @@ Structured decoding helps ensure the model outputs data in a consistent, parseab
 Here's an example of how to use guided decoding to generate data in a structured format:
 
 ```{code-block} python
-:emphasize-lines: 1, 7, 11, 12, 13, 14, 15, 16, 27, 28, 52
+:emphasize-lines: 1, 7, 11, 12, 13, 14, 15, 16, 25, 49
 
 from pydantic import BaseModel
-from oumi.inference import RemoteInferenceEngine
+from oumi.inference import OpenAIInferenceEngine
 from oumi.core.configs import (
     ModelParams,
     RemoteParams,
@@ -74,10 +74,7 @@ class ProductInfo(BaseModel):
 
 config = InferenceConfig(
     model=ModelParams(model_name="gpt-4o-mini"),
-    remote_params=RemoteParams(
-        api_url="https://api.openai.com/v1/chat/completions",
-        api_key_env_varname="OPENAI_API_KEY",
-    ),
+
     generation=GenerationParams(
         max_new_tokens=512,
         temperature=0,  # Use deterministic output for structured data
@@ -86,7 +83,7 @@ config = InferenceConfig(
 )
 
 # Configure engine for JSON output
-engine = RemoteInferenceEngine(
+engine = OpenAIInferenceEngine(
     model_params=config.model,
     remote_params=config.remote_params,
 )
@@ -104,34 +101,31 @@ conversation = Conversation(
         )
     ]
 )
-result = engine.infer_online([conversation], inference_config=config)
+result = engine.infer([conversation], inference_config=config)
 product = ProductInfo.model_validate_json(result[0].messages[-1].content)
 ```
-
 
 ## Parallel Processing with Multiple Workers
 
 For high-throughput scenarios where you need to process many requests concurrently, you can leverage multiple workers:
 
 ```{code-block} python
-:emphasize-lines: 10, 11, 12
+:emphasize-lines: 8, 9, 10
 
-from oumi.inference import RemoteInferenceEngine
+from oumi.inference import OpenAIInferenceEngine
 from oumi.core.configs import InferenceConfig, RemoteParams, ModelParams
 
 # Configure engine with multiple workers
 config = InferenceConfig(
     model=ModelParams(model_name="gpt-4"),
     remote_params=RemoteParams(
-        api_url="https://api.openai.com/v1/chat/completions",
-        api_key_env_varname="OPENAI_API_KEY",
         max_retries=3,  # Number of retry attempts on failure
         num_workers=4,  # Process 4 requests concurrently
         politeness_policy=1.  # Sleep duration in seconds after an error
     )
 )
 
-engine = RemoteInferenceEngine(
+engine = OpenAIInferenceEngine(
     model_params=config.model,
     remote_params=config.remote_params
 )
@@ -153,25 +147,23 @@ This is useful for non-interactive workloads, or when you need to process a larg
 
 Batch processing offers several key advantages over real-time inference with multiple workers: all the error handling, rate limiting, and throughput batching are handled for you, and it's typically cheaper than manually managing concurrent real-time requests.
 
-Here's an example of how to use it with oumi:
+Here's an OpenAI example of how to use Oumi's async batch inference:
 
 ```{code-block} python
-:emphasize-lines: 10,26
+:emphasize-lines: 8,24
 
-from oumi.inference import RemoteInferenceEngine
+from oumi.inference import OpenAIInferenceEngine
 from oumi.core.configs import InferenceConfig, RemoteParams, ModelParams
 
 # Initialize engine with batch settings
 config = InferenceConfig(
     model=ModelParams(model_name="gpt-4"),
     remote_params=RemoteParams(
-        api_url="https://api.openai.com/v1/chat/completions",
-        api_key_env_varname="OPENAI_API_KEY",
         batch_completion_window="24h"  # Time window for processing
     )
 )
 
-engine = RemoteInferenceEngine(
+engine = OpenAIInferenceEngine(
     model_params=config.model,
     remote_params=config.remote_params
 )

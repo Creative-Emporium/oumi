@@ -1,5 +1,19 @@
+# Copyright 2025 - Oumi
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Optional
 
@@ -8,7 +22,6 @@ from transformers.utils import find_adapter_config_file, is_flash_attn_2_availab
 
 from oumi.core.configs.params.base_params import BaseParams
 from oumi.core.types.exceptions import HardwareException
-from oumi.utils.distributed_utils import is_using_accelerate
 from oumi.utils.logging import logger
 from oumi.utils.torch_utils import get_torch_dtype
 
@@ -56,6 +69,16 @@ class ModelParams(BaseParams):
     covered by other fields in ModelParams.
     """
 
+    processor_kwargs: dict[str, Any] = field(default_factory=dict)
+    """Additional keyword arguments to pass into the processor's constructor.
+
+    Processors are used in Oumi for vision-language models to process image and
+    text inputs. This field is optional and can be left empty for text-only models,
+    or if not needed.
+
+    These params override model-specific default values for these kwargs, if present.
+    """
+
     model_max_length: Optional[int] = None
     """The maximum sequence length the model can handle.
 
@@ -84,17 +107,19 @@ class ModelParams(BaseParams):
     Defaults to False for safety.
     """
 
-    torch_dtype_str: str = "float32"
-    """The data type to use for the model's parameters as a string.
+    torch_dtype_str: str = "auto"
+    """The data type to use for the model's parameters, as a string.
 
     Valid options are:
+    - "auto": Use the default dtype of the model, which is usually specified in the
+      config.json file for HF models.
     - "float32" or "f32" or "float" for 32-bit floating point
     - "float16" or "f16" or "half" for 16-bit floating point
     - "bfloat16" or "bf16" for brain floating point
     - "float64" or "f64" or "double" for 64-bit floating point
 
-    This string will be converted to the corresponding torch.dtype.
-    Defaults to "float32" for full precision.
+    If not "auto", the string will be converted to the corresponding torch.dtype.
+    Defaults to "auto".
     """
 
     compile: bool = False
@@ -106,8 +131,12 @@ class ModelParams(BaseParams):
     chat_template: Optional[str] = None
     """The chat template to use for formatting inputs.
 
-    If provided, this template will be used to format multi-turn conversations
-    for models that support chat-like interactions.
+    Options:
+    - None: Uses fallback hierarchy (internal config → built-in template → default)
+    - "auto": Directly uses model's built-in chat template (recommended for clarity)
+    - Custom string: Uses specified Oumi template name (e.g., "llama3-instruct")
+
+    Recommendation: Use explicit "auto" instead of None for less ambiguous behavior.
 
     Note:
         Different models may require specific chat templates. Consult the model's
@@ -124,6 +153,9 @@ class ModelParams(BaseParams):
     - "flash_attention_2": Use Flash Attention 2 for potentially faster computation.
       Requires "flash-attn" package to be installed
     - "eager": Manual implementation of attention
+    - "kernels-community/vllm-flash-attn3": Use vLLM Flash Attention 3 kernel from
+      HF Hub
+    - Custom kernel paths: Any HuggingFace Hub path to attention kernels
     """
 
     device_map: Optional[str] = "auto"
@@ -162,10 +194,6 @@ class ModelParams(BaseParams):
 
     This is needed for large models that do not fit on a single GPU.
     It is used as the value for the `parallelize` argument in LM Harness.
-
-    If this is enabled, the eval job must be kicked off with `python` as opposed to
-    `accelerate launch`, as described here:
-    https://github.com/EleutherAI/lm-evaluation-harness?tab=readme-ov-file#multi-gpu-evaluation-with-hugging-face-accelerate
     """
 
     freeze_layers: list[str] = field(default_factory=list)
@@ -177,34 +205,35 @@ class ModelParams(BaseParams):
     other parts fixed.
     """
 
-    def to_lm_harness(self) -> dict[str, Any]:
-        """Converts Oumi's ModelParams to LM Harness model arguments."""
-        model_args_dict = {
-            "pretrained": self.model_name,
-            "trust_remote_code": self.trust_remote_code,
-            "parallelize": self.shard_for_eval,
-            "dtype": self.torch_dtype,
-            "device_map": self.device_map,
-        }
-        if self.adapter_model:
-            model_args_dict["peft"] = self.adapter_model
-        if self.attn_implementation:
-            model_args_dict["attn_implementation"] = self.attn_implementation
+    model_revision: Optional[str] = None
+    """The revision of the model to use.
 
-        # Handle extra model_kwargs (construction arguments).
-        # Towards OPE-564.
-        if self.model_kwargs:
-            relevant_for_lm = ["load_in_4bit", "load_in_8bit", "max_memory_per_gpu"]
-            for key in relevant_for_lm:
-                if key in self.model_kwargs:
-                    model_args_dict[key] = self.model_kwargs[key]
-            # TODO: load_in_8bit, load_in_4bit are deprecated and will be removed in
-            # future versions of HF. Integrate via PeftConfig.
-        return model_args_dict
+    This is used to specify the version of the model to use.
+    """
 
     def __post_init__(self):
         """Populate additional params."""
-        self.torch_dtype = get_torch_dtype(self.torch_dtype_str)
+        self.torch_dtype = None
+        if self.torch_dtype_str != "auto":
+            self.torch_dtype = get_torch_dtype(self.torch_dtype_str)
+
+        if len(self.processor_kwargs) > 0:
+            conflicting_keys = {f.name for f in fields(self)}.intersection(
+                self.processor_kwargs.keys()
+            )
+            if len(conflicting_keys) > 0:
+                raise ValueError(
+                    "processor_kwargs attempts to override the following "
+                    f"reserved fields: {conflicting_keys}. "
+                    "Use properties of ModelParams instead."
+                )
+
+        if "revision" in self.model_kwargs:
+            logger.warning(
+                "`revision` is deprecated. Use `model_revision` instead. "
+                "This will be removed in a future version."
+            )
+            self.model_revision = self.model_kwargs.pop("revision")
 
     def __finalize_and_validate__(self):
         """Finalizes and validates final config params."""
@@ -256,12 +285,6 @@ class ModelParams(BaseParams):
                 "Flash attention 2 was requested but it is not "
                 "supported. Confirm that your hardware is compatible and then "
                 "consider installing it: pip install -U flash-attn --no-build-isolation"
-            )
-
-        if self.shard_for_eval and is_using_accelerate():
-            raise ValueError(
-                "Sharded-model evaluations with LM Harness should be invoked with "
-                "`python`, not `accelerate launch`."
             )
 
         if self.model_max_length is not None and self.model_max_length <= 0:

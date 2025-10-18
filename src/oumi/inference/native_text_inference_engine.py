@@ -1,5 +1,19 @@
-import copy
-from typing import Optional
+# Copyright 2025 - Oumi
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import warnings
+from typing import Optional, cast
 
 import PIL.Image
 import torch
@@ -15,9 +29,13 @@ from oumi.builders import (
     is_image_text_llm,
 )
 from oumi.core.configs import GenerationParams, InferenceConfig, ModelParams
+from oumi.core.configs.internal.supported_models import (
+    find_internal_model_config_using_model_name,
+)
 from oumi.core.inference import BaseInferenceEngine
 from oumi.core.processors.base_processor import BaseProcessor
-from oumi.core.types.conversation import Conversation, Message, Role, Type
+from oumi.core.types.conversation import Conversation, Message, Role
+from oumi.utils.conversation_utils import load_image_bytes_to_content_item
 from oumi.utils.image_utils import load_pil_image_from_bytes
 from oumi.utils.logging import logger
 
@@ -25,22 +43,56 @@ from oumi.utils.logging import logger
 class NativeTextInferenceEngine(BaseInferenceEngine):
     """Engine for running text-to-text model inference."""
 
-    def __init__(self, model_params: ModelParams):
+    def __init__(
+        self,
+        model_params: ModelParams,
+        *,
+        generation_params: Optional[GenerationParams] = None,
+    ):
         """Initializes the inference Engine.
 
         Args:
             model_params: The model parameters to use for inference.
+            generation_params: Parameters for generation.
         """
-        self._model_params = copy.deepcopy(model_params)
-        self._model = build_model(self._model_params)
+        super().__init__(model_params=model_params, generation_params=generation_params)
+
+        self._model = cast(
+            transformers.PreTrainedModel, build_model(self._model_params)
+        )
+        if (
+            not hasattr(self._model, "generation_config")
+            or self._model.generation_config is None
+        ):
+            raise ValueError(
+                f"Model {self._model_params.model_name} requires a generation config."
+            )
         self._tokenizer = build_tokenizer(self._model_params)
         self._processor: Optional[BaseProcessor] = None
+
+        if not hasattr(self._model, "generate"):
+            raise ValueError(
+                f"Model {self._model_params.model_name} does not support generation."
+            )
+
+        self._supports_multiple_images: bool = False
         if is_image_text_llm(self._model_params):
             # Only enable Processor for vision language models for now.
             self._processor = build_processor(
                 self._model_params.model_name,
                 self._tokenizer,
                 trust_remote_code=self._model_params.trust_remote_code,
+                processor_kwargs=self._model_params.processor_kwargs,
+            )
+            internal_model_config = find_internal_model_config_using_model_name(
+                self._model_params.model_name,
+                trust_remote_code=self._model_params.trust_remote_code,
+            )
+
+            self._supports_multiple_images = (
+                (internal_model_config is not None)
+                and (internal_model_config.visual_config is not None)
+                and internal_model_config.visual_config.supports_multiple_images
             )
 
         # https://stackoverflow.com/questions/69609401/suppress-huggingface-logging-warning-setting-pad-token-id-to-eos-token-id
@@ -119,13 +171,20 @@ class NativeTextInferenceEngine(BaseInferenceEngine):
 
     def _apply_chat_template_impl(self, conversation: Conversation) -> str:
         if self._processor is None:
-            return self._tokenizer.apply_chat_template(
-                conversation,  # type: ignore
+            prompt = self._tokenizer.apply_chat_template(
+                conversation.to_dict()["messages"],
                 tokenize=False,
                 add_generation_prompt=True,
             )
+            if not isinstance(prompt, str):
+                raise RuntimeError(
+                    "`apply_chat_template` returned an object that is not a string. "
+                    f"Actual type: {type(prompt)}"
+                )
+            return prompt
+
         return self._processor.apply_chat_template(
-            conversation,  # type: ignore
+            conversation.messages,
             add_generation_prompt=True,
         )
 
@@ -146,38 +205,31 @@ class NativeTextInferenceEngine(BaseInferenceEngine):
                 item for m in conversation.messages for item in m.image_content_items
             ]
             num_images = len(image_items)
-            if num_images >= 1:
-                if num_images > 1:
-                    # FIXME OPE-355 Support multiple images
-                    logger.warning(
-                        conversation.append_id_to_string(
-                            f"A conversation contains multiple images ({num_images}). "
-                            "Only 1 image is currently supported. "
-                            "Using the last image."
-                        )
-                    )
-                if len(pil_images) != i:
+            if num_images > 0:
+                max_images = num_images if self._supports_multiple_images else 1
+                if num_images > max_images:
+                    # If a conversation contains too many images, raise an error.
+                    # We can't silently discard extra images at this point
+                    # as many models verify that the actual number of images matches
+                    # the number of image tokens in text prompt.
                     raise ValueError(
                         conversation.append_id_to_string(
-                            "All or none conversations in a batch must contain images."
+                            f"A conversation contains too many images ({num_images}). "
+                            f"Max {max_images} image is allowed."
                         )
                     )
-                image_item = image_items[-1]
-                if image_item.type != Type.IMAGE_BINARY:
-                    raise NotImplementedError(
-                        conversation.append_id_to_string(
-                            "Only binary image messages (`IMAGE_BINARY`) "
-                            f"are supported. Actual: {image_item.type}"
+
+                for idx, image_item in enumerate(image_items):
+                    image_item = load_image_bytes_to_content_item(image_item)
+                    if image_item.binary is None or len(image_item.binary) == 0:
+                        raise ValueError(
+                            conversation.append_id_to_string(
+                                "No image bytes "
+                                f"in image item {idx + 1} of {num_images}!"
+                            )
                         )
-                    )
-                elif image_item.binary is None or len(image_item.binary) == 0:
-                    raise ValueError(
-                        conversation.append_id_to_string(
-                            "No image bytes in a binary image message (`IMAGE_BINARY`)!"
-                        )
-                    )
-                image = load_pil_image_from_bytes(image_item.binary)
-                pil_images.append(image)
+                    image = load_pil_image_from_bytes(image_item.binary)
+                    pil_images.append(image)
 
         batch = self._processor(
             text=text_prompts,
@@ -190,7 +242,7 @@ class NativeTextInferenceEngine(BaseInferenceEngine):
     def _infer(
         self,
         input: list[Conversation],
-        inference_config: InferenceConfig,
+        inference_config: Optional[InferenceConfig] = None,
     ) -> list[Conversation]:
         """Runs batch inference for a model using the provided configuration.
 
@@ -201,7 +253,11 @@ class NativeTextInferenceEngine(BaseInferenceEngine):
         Returns:
             object: A list of model responses of shape (num_batches, batch_size).
         """
-        generation_params = inference_config.generation
+        generation_params = (
+            inference_config.generation
+            if inference_config and inference_config.generation
+            else self._generation_params
+        )
         model_device = next(self._model.parameters()).device
         if generation_params.batch_size is None:
             logger.warning("Batch size not specified. Defaulting to 1.")
@@ -231,14 +287,24 @@ class NativeTextInferenceEngine(BaseInferenceEngine):
 
         # Create a GenerationConfig object with the new parameters
         # Documentation: https://huggingface.co/docs/transformers/en/main_classes/text_generation#transformers.GenerationConfig
+        use_sampling = generation_params.use_sampling
+        extra_kwargs = {}
+        min_p, temperature = generation_params.min_p, generation_params.temperature
+        if use_sampling:
+            extra_kwargs["min_p"] = min_p
+            extra_kwargs["temperature"] = temperature
+        elif min_p > 0.0 or temperature > 0.0:
+            logger.debug(
+                f"The sampling params: min_p: {min_p} and temperature: {temperature} "
+                "are ignored because sampling is disabled!"
+            )
+
         generation_config = transformers.GenerationConfig(
             max_new_tokens=generation_params.max_new_tokens,
-            temperature=generation_params.temperature,
             top_p=generation_params.top_p,
             frequency_penalty=generation_params.frequency_penalty,
             presence_penalty=generation_params.presence_penalty,
-            do_sample=generation_params.use_sampling,
-            min_p=generation_params.min_p,
+            do_sample=use_sampling,
             include_stop_str_in_output=False,
             detokenize=True,
             seed=generation_params.seed,
@@ -246,6 +312,7 @@ class NativeTextInferenceEngine(BaseInferenceEngine):
             eos_token_id=generation_params.stop_token_ids,
             num_beams=generation_params.num_beams,
             use_cache=generation_params.use_cache,
+            **extra_kwargs,
         )
 
         # skip using a progress for single turns
@@ -259,11 +326,15 @@ class NativeTextInferenceEngine(BaseInferenceEngine):
             disable=disable_tgdm,
         ):
             batch = input_batches[batch_index]
-            output_batch = self._model.generate(
-                **batch, generation_config=generation_config, tokenizer=self._tokenizer
+            output_batch: torch.LongTensor = self._model.generate(
+                # TODO: OPE-1328 - Fix type.
+                # type(batch) == BatchEncoding, but function expects a tensor.
+                **batch,  # type: ignore
+                generation_config=generation_config,
+                tokenizer=self._tokenizer,
             )
 
-            # For each batch, remove the prepended prompts from all model reponses.
+            # For each batch, remove the prepended prompts from all model responses.
             if generation_params.exclude_prompt_from_response:
                 new_batch_data = []
                 for response_index, response in enumerate(output_batch.data):
@@ -283,8 +354,8 @@ class NativeTextInferenceEngine(BaseInferenceEngine):
 
             output_batch_decoded = self._tokenizer.batch_decode(
                 output_batch.data,
-                skip_special_tokens=True,
                 clean_up_tokenization_spaces=True,
+                skip_special_tokens=generation_params.skip_special_tokens,
             )
             for conversation, response in zip(
                 batched_input[batch_index], output_batch_decoded
@@ -298,17 +369,19 @@ class NativeTextInferenceEngine(BaseInferenceEngine):
                     metadata=conversation.metadata,
                     conversation_id=conversation.conversation_id,
                 )
-                if inference_config.output_path:
-                    self._save_conversation(
-                        new_conversation, inference_config.output_path
-                    )
+                self._save_conversation_to_scratch(
+                    new_conversation,
+                    inference_config.output_path if inference_config else None,
+                )
                 output_conversations.append(new_conversation)
 
         return output_conversations
 
     @override
-    def infer_online(
-        self, input: list[Conversation], inference_config: InferenceConfig
+    def _infer_online(
+        self,
+        input: list[Conversation],
+        inference_config: Optional[InferenceConfig] = None,
     ) -> list[Conversation]:
         """Runs model inference online.
 
@@ -322,8 +395,54 @@ class NativeTextInferenceEngine(BaseInferenceEngine):
         return self._infer(input, inference_config)
 
     @override
+    def get_supported_params(self) -> set[str]:
+        """Returns a set of supported generation parameters for this engine."""
+        return {
+            "batch_size",
+            "exclude_prompt_from_response",
+            "frequency_penalty",
+            "max_new_tokens",
+            "min_p",
+            "presence_penalty",
+            "seed",
+            "skip_special_tokens",
+            "stop_strings",
+            "stop_token_ids",
+            "temperature",
+            "top_p",
+            "use_sampling",
+            "use_cache",
+            "num_beams",
+        }
+
+    def infer_online(
+        self,
+        input: list[Conversation],
+        inference_config: Optional[InferenceConfig] = None,
+    ) -> list[Conversation]:
+        """Runs model inference online.
+
+        Args:
+            input: A list of conversations to run inference on.
+            inference_config: Parameters for inference.
+
+        Returns:
+            List[Conversation]: Inference output.
+        """
+        warnings.warn(
+            "infer_online() will be private in the future. Use infer() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        results = self._infer_online(input, inference_config)
+        if inference_config and inference_config.output_path:
+            self._save_conversations(results, inference_config.output_path)
+        return results
+
     def infer_from_file(
-        self, input_filepath: str, inference_config: InferenceConfig
+        self,
+        input_filepath: str,
+        inference_config: Optional[InferenceConfig] = None,
     ) -> list[Conversation]:
         """Runs model inference on inputs in the provided file.
 
@@ -337,25 +456,13 @@ class NativeTextInferenceEngine(BaseInferenceEngine):
         Returns:
             List[Conversation]: Inference output.
         """
+        warnings.warn(
+            "infer_from_file() will be private in the future. Use infer() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         input = self._read_conversations(input_filepath)
-        return self._infer(input, inference_config)
-
-    @override
-    def get_supported_params(self) -> set[str]:
-        """Returns a set of supported generation parameters for this engine."""
-        return {
-            "batch_size",
-            "exclude_prompt_from_response",
-            "frequency_penalty",
-            "max_new_tokens",
-            "min_p",
-            "presence_penalty",
-            "seed",
-            "stop_strings",
-            "stop_token_ids",
-            "temperature",
-            "top_p",
-            "use_sampling",
-            "use_cache",
-            "num_beams",
-        }
+        results = self._infer(input, inference_config)
+        if inference_config and inference_config.output_path:
+            self._save_conversations(results, inference_config.output_path)
+        return results

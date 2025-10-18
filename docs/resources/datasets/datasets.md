@@ -10,6 +10,7 @@ sft_datasets
 pretraining_datasets
 preference_datasets
 vl_sft_datasets
+other_datasets
 ```
 
 ## Overview
@@ -31,6 +32,7 @@ The fastest way to get started is using one of our pre-built datasets. These dat
 
 ::::{tab-set}
 :::{tab-item} YAML Config
+
 ```yaml
 data:
   train:
@@ -38,9 +40,11 @@ data:
       - dataset_name: tatsu-lab/alpaca
         split: train
 ```
+
 :::
 
 :::{tab-item} Python API
+
 ```python
 from oumi.builders import build_dataset
 from oumi.core.configs import DatasetSplit
@@ -59,6 +63,7 @@ for batch in dataloader:
     # Your training code here
     pass
 ```
+
 :::
 ::::
 
@@ -68,6 +73,7 @@ For more complex training scenarios, you might want to combine multiple datasets
 
 ::::{tab-set}
 :::{tab-item} YAML Config
+
 ```yaml
 data:
   train:
@@ -79,15 +85,19 @@ data:
     mixture_strategy: first_exhausted  # Strategy for combining multiple datasets
     collator_name: text_with_padding
 ```
+
 :::
 
 :::{tab-item} Python API
-```python
-from oumi.core.configs import DataParams, DatasetParams
-from oumi.builders import build_dataset_mixture
 
+```python
+from oumi.builders import build_dataset_mixture
+from oumi.core.configs import DataParams, DatasetParams, DatasetSplit, DatasetSplitParams
+from oumi.core.tokenizers import BaseTokenizer
+
+tokenizer: BaseTokenizer = ...
 # Build a mixture of datasets
-config = DataParams(
+data_params = DataParams(
     train=DatasetSplitParams(
         datasets=[
             DatasetParams(dataset_name="tatsu-lab/alpaca"),
@@ -98,10 +108,12 @@ config = DataParams(
 )
 
 dataset = build_dataset_mixture(
-    config=config,
-    split=DatasetSplit.TRAIN
+    data_params=data_params,
+    tokenizer=tokenizer,
+    dataset_split=DatasetSplit.TRAIN
 )
 ```
+
 :::
 ::::
 
@@ -137,8 +149,9 @@ data:
 ```
 
 This separation between the dataset class and data source makes it easy to:
+
 - Use the same processing logic with different data sources.
-  - For example, the {py:class}`~oumi.datasets.sft.alpaca.AlpacaDataset` class can be used with both the default Alpaca data (`"tatsu-lab/alpaca"`), or one of the cleaned verions (`yahma/alpaca-cleaned`), or any other file that follows the same format.
+  - For example, the {py:class}`~oumi.datasets.sft.alpaca.AlpacaDataset` class can be used with both the default Alpaca data (`"tatsu-lab/alpaca"`), or one of the cleaned versions (`yahma/alpaca-cleaned`), or any other file that follows the same format.
 - Apply consistent formatting across your own datasets
 - Mix and match different dataset types in training
 
@@ -153,6 +166,7 @@ Our dataset collection covers various training objectives and tasks:
 | **Preference Tuning** | • Human preference data for RLHF or DPOtraining | [→ Preference learning guide](preference_datasets.md) |
 | **Vision-Language** | • Image-text pairs for multi-modal training <br>• Conversation format support for chat models| [→ Vision-language guide](vl_sft_datasets.md) |
 
+It's also possible to define custom datasets for new types of data not covered above. See [→ Other Datasets](other_datasets.md).
 
 ## Next Steps
 

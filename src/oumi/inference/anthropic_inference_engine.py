@@ -1,8 +1,22 @@
-from typing import Any
+# Copyright 2025 - Oumi
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from typing import Any, Optional
 
 from typing_extensions import override
 
-from oumi.core.configs import GenerationParams, RemoteParams
+from oumi.core.configs import GenerationParams, ModelParams, RemoteParams
 from oumi.core.types.conversation import Conversation, Message, Role
 from oumi.inference.remote_inference_engine import RemoteInferenceEngine
 from oumi.utils.logging import logger
@@ -27,9 +41,24 @@ class AnthropicInferenceEngine(RemoteInferenceEngine):
     https://docs.anthropic.com/claude/reference/versioning
     """
 
+    @property
+    @override
+    def base_url(self) -> Optional[str]:
+        """Return the default base URL for the Anthropic API."""
+        return "https://api.anthropic.com/v1/messages"
+
+    @property
+    @override
+    def api_key_env_varname(self) -> Optional[str]:
+        """Return the default environment variable name for the Anthropic API key."""
+        return "ANTHROPIC_API_KEY"
+
     @override
     def _convert_conversation_to_api_input(
-        self, conversation: Conversation, generation_params: GenerationParams
+        self,
+        conversation: Conversation,
+        generation_params: GenerationParams,
+        model_params: ModelParams,
     ) -> dict[str, Any]:
         """Converts a conversation to an Anthropic API input.
 
@@ -42,6 +71,7 @@ class AnthropicInferenceEngine(RemoteInferenceEngine):
         Args:
             conversation: The Oumi Conversation object to convert.
             generation_params: Parameters for text generation.
+            model_params: Model parameters to use during inference.
 
         Returns:
             Dict[str, Any]: A dictionary containing the formatted input for the
@@ -72,7 +102,7 @@ class AnthropicInferenceEngine(RemoteInferenceEngine):
         # Build request body
         # See https://docs.anthropic.com/claude/reference/messages_post
         body = {
-            "model": self._model,
+            "model": model_params.model_name,
             "messages": self._get_list_of_message_json_dicts(
                 messages, group_adjacent_same_role_turns=True
             ),
@@ -121,3 +151,8 @@ class AnthropicInferenceEngine(RemoteInferenceEngine):
             "temperature",
             "top_p",
         }
+
+    @override
+    def _default_remote_params(self) -> RemoteParams:
+        """Returns the default remote parameters."""
+        return RemoteParams(num_workers=5, politeness_policy=60.0)

@@ -1,3 +1,17 @@
+# Copyright 2025 - Oumi
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from collections.abc import Sequence
 from pprint import pformat
 from typing import NamedTuple, Optional
@@ -130,6 +144,10 @@ def _get_nvidia_gpu_runtime_info_impl(
 
     try:
         gpu_handle = pynvml.nvmlDeviceGetHandleByIndex(device_index)
+    except pynvml.NVMLError_NotSupported:  # pyright: ignore
+        # This error is expected on some systems.
+        # Only do DEBUG-level logging to reduce noise.
+        logger.debug(f"pyNVML GPU handle not supported for device: {device_index}")
     except Exception:
         logger.exception(f"Failed to get GPU handle for device: {device_index}")
         return None
@@ -139,6 +157,12 @@ def _get_nvidia_gpu_runtime_info_impl(
         try:
             info = pynvml.nvmlDeviceGetMemoryInfo(gpu_handle)
             used_memory_mb_value = float(info.used) // 1024**2
+        except pynvml.NVMLError_NotSupported:  # pyright: ignore
+            # This error is expected on some systems.
+            # Only do DEBUG-level logging to reduce noise.
+            logger.debug(
+                f"pyNVML GPU memory info not supported for device: {device_index}"
+            )
         except Exception:
             logger.exception(
                 f"Failed to get GPU memory info for device: {device_index}"
@@ -151,6 +175,12 @@ def _get_nvidia_gpu_runtime_info_impl(
             temperature_value = pynvml.nvmlDeviceGetTemperature(
                 gpu_handle, pynvml.NVML_TEMPERATURE_GPU
             )
+        except pynvml.NVMLError_NotSupported:  # pyright: ignore
+            # This error is expected on some systems.
+            # Only do DEBUG-level logging to reduce noise.
+            logger.debug(
+                f"pyNVML GPU temperature not supported for device: {device_index}"
+            )
         except Exception:
             logger.exception(
                 f"Failed to get GPU temperature for device: {device_index}"
@@ -162,6 +192,12 @@ def _get_nvidia_gpu_runtime_info_impl(
     if fan_speed:
         try:
             fan_speed_value = pynvml.nvmlDeviceGetFanSpeed(gpu_handle)
+        except pynvml.NVMLError_NotSupported:  # pyright: ignore
+            # This error is expected on some systems.
+            # Only do DEBUG-level logging to reduce noise.
+            logger.debug(
+                f"pyNVML GPU fan speed not supported for device: {device_index}"
+            )
         except Exception:
             # The `GetFanSpeed` function fails on many systems
             # Only do DEBUG-level logging to reduce noise.
@@ -192,6 +228,12 @@ def _get_nvidia_gpu_runtime_info_impl(
 
             milliwatts = pynvml.nvmlDeviceGetPowerManagementLimit(gpu_handle)
             power_limit_watts_value = float(milliwatts) * 1e-3
+        except pynvml.NVMLError_NotSupported:  # pyright: ignore
+            # This error is expected on some systems.
+            # Only do DEBUG-level logging to reduce noise.
+            logger.debug(
+                f"pyNVML GPU power usage not supported for device: {device_index}"
+            )
         except Exception:
             logger.exception(
                 f"Failed to get GPU power usage for device: {device_index}"
@@ -205,6 +247,12 @@ def _get_nvidia_gpu_runtime_info_impl(
             result = pynvml.nvmlDeviceGetUtilizationRates(gpu_handle)
             gpu_utilization_value = int(result.gpu)
             memory_utilization_value = int(result.memory)
+        except pynvml.NVMLError_NotSupported:  # pyright: ignore
+            # This error is expected on some systems.
+            # Only do DEBUG-level logging to reduce noise.
+            logger.debug(
+                f"pyNVML GPU utilization not supported for device: {device_index}"
+            )
         except Exception:
             logger.exception(
                 f"Failed to get GPU utilization for device: {device_index}"
@@ -216,6 +264,12 @@ def _get_nvidia_gpu_runtime_info_impl(
         try:
             performance_state_value = int(
                 pynvml.nvmlDeviceGetPerformanceState(gpu_handle)
+            )
+        except pynvml.NVMLError_NotSupported:  # pyright: ignore
+            # This error is expected on some systems.
+            # Only do DEBUG-level logging to reduce noise.
+            logger.debug(
+                f"pyNVML GPU performance state not supported for device: {device_index}"
             )
         except Exception:
             logger.exception(
@@ -236,6 +290,12 @@ def _get_nvidia_gpu_runtime_info_impl(
             )
             clock_speed_memory_value = int(
                 pynvml.nvmlDeviceGetClockInfo(gpu_handle, pynvml.NVML_CLOCK_MEM)
+            )
+        except pynvml.NVMLError_NotSupported:  # pyright: ignore
+            # This error is expected on some systems.
+            # Only do DEBUG-level logging to reduce noise.
+            logger.debug(
+                f"pyNVML GPU clock speed not supported for device: {device_index}"
             )
         except Exception:
             logger.exception(
