@@ -1,19 +1,21 @@
 import tempfile
 from pathlib import Path
-from typing import Final
 
 import jsonlines
+import pytest
 
 from oumi.core.configs import GenerationParams, InferenceConfig, ModelParams
-from oumi.core.types.conversation import Conversation, Message, Role, Type
+from oumi.core.types.conversation import (
+    ContentItem,
+    Conversation,
+    Message,
+    Role,
+    Type,
+)
 from oumi.inference import NativeTextInferenceEngine
 from oumi.utils.image_utils import load_image_png_bytes_from_path
-from oumi.utils.io_utils import get_oumi_root_directory
-from tests.markers import requires_cuda_initialized
-
-TEST_IMAGE_DIR: Final[Path] = (
-    get_oumi_root_directory().parent.parent.resolve() / "tests" / "testdata" / "images"
-)
+from tests.integration.infer import get_default_device_map_for_inference
+from tests.markers import requires_cuda_initialized, requires_gpus
 
 
 def _get_default_text_model_params() -> ModelParams:
@@ -22,21 +24,25 @@ def _get_default_text_model_params() -> ModelParams:
         trust_remote_code=True,
         chat_template="gpt2",
         tokenizer_pad_token="<|endoftext|>",
+        device_map=get_default_device_map_for_inference(),
     )
 
 
 def _get_default_image_model_params() -> ModelParams:
     return ModelParams(
-        model_name="llava-hf/llava-1.5-7b-hf",
+        model_name="Qwen/Qwen2-VL-2B-Instruct",
         model_max_length=1024,
         trust_remote_code=True,
-        chat_template="llava",
+        chat_template="qwen2-vl-instruct",
+        device_map=get_default_device_map_for_inference(),
     )
 
 
 def _get_default_inference_config() -> InferenceConfig:
     return InferenceConfig(
-        generation=GenerationParams(max_new_tokens=5, temperature=0.0, seed=42)
+        generation=GenerationParams(
+            max_new_tokens=5, use_sampling=False, temperature=0.0, min_p=0.0, seed=42
+        )
     )
 
 
@@ -55,6 +61,7 @@ def _setup_input_conversations(filepath: str, conversations: list[Conversation])
 #
 # Tests
 #
+@requires_gpus()
 def test_infer_online():
     engine = NativeTextInferenceEngine(_get_default_text_model_params())
     conversation = Conversation(
@@ -84,13 +91,13 @@ def test_infer_online():
             conversation_id="123",
         )
     ]
-    result = engine.infer_online([conversation], _get_default_inference_config())
+    result = engine.infer([conversation], _get_default_inference_config())
     assert expected_result == result
 
 
 def test_infer_online_empty():
     engine = NativeTextInferenceEngine(_get_default_text_model_params())
-    result = engine.infer_online([], _get_default_inference_config())
+    result = engine.infer([], _get_default_inference_config())
     assert [] == result
 
 
@@ -149,7 +156,7 @@ def test_infer_online_to_file():
         output_path = Path(output_temp_dir) / "b" / "output.jsonl"
         inference_config = _get_default_inference_config()
         inference_config.output_path = str(output_path)
-        result = engine.infer_online(
+        result = engine.infer(
             [conversation_1, conversation_2],
             inference_config,
         )
@@ -193,15 +200,10 @@ def test_infer_from_file():
                 conversation_id="123",
             )
         ]
-        result = engine.infer_from_file(
-            str(input_path),
-            _get_default_inference_config(),
-        )
+        config = _get_default_inference_config()
+        config.input_path = str(input_path)
+        result = engine.infer(inference_config=config)
         assert expected_result == result
-        inference_config = _get_default_inference_config()
-        inference_config.input_path = str(input_path)
-        infer_result = engine.infer(inference_config=inference_config)
-        assert expected_result == infer_result
 
 
 def test_infer_from_file_empty():
@@ -210,11 +212,9 @@ def test_infer_from_file_empty():
         _setup_input_conversations(str(input_path), [])
         engine = NativeTextInferenceEngine(_get_default_text_model_params())
         inference_config = _get_default_inference_config()
-        result = engine.infer_from_file(str(input_path), inference_config)
-        assert [] == result
         inference_config.input_path = str(input_path)
-        infer_result = engine.infer(inference_config=inference_config)
-        assert [] == infer_result
+        result = engine.infer(inference_config=inference_config)
+        assert [] == result
 
 
 def test_infer_from_file_to_file():
@@ -274,7 +274,7 @@ def test_infer_from_file_to_file():
         output_path = Path(output_temp_dir) / "b" / "output.jsonl"
         inference_config = _get_default_inference_config()
         inference_config.output_path = str(output_path)
-        result = engine.infer_online(
+        result = engine.infer(
             [conversation_1, conversation_2],
             inference_config,
         )
@@ -287,13 +287,16 @@ def test_infer_from_file_to_file():
 
 
 @requires_cuda_initialized()
-def test_infer_from_file_to_file_with_images():
+@pytest.mark.single_gpu
+def test_infer_from_file_to_file_with_images(root_testdata_dir: Path):
     png_image_bytes_great_wave = load_image_png_bytes_from_path(
-        TEST_IMAGE_DIR / "the_great_wave_off_kanagawa.jpg"
+        root_testdata_dir / "images" / "the_great_wave_off_kanagawa.jpg"
     )
     png_image_bytes_logo = load_image_png_bytes_from_path(
-        TEST_IMAGE_DIR / "oumi_logo_dark.png"
+        root_testdata_dir / "images" / "oumi_logo_dark.png"
     )
+
+    test_prompt: str = "Generate a short, descriptive caption for this image!"
 
     with tempfile.TemporaryDirectory() as output_temp_dir:
         engine = NativeTextInferenceEngine(_get_default_image_model_params())
@@ -301,13 +304,17 @@ def test_infer_from_file_to_file_with_images():
             messages=[
                 Message(
                     role=Role.USER,
-                    type=Type.IMAGE_BINARY,
-                    binary=png_image_bytes_great_wave,
-                ),
-                Message(
-                    content="Describe the high-level theme of the image in few words!",
-                    role=Role.USER,
-                ),
+                    content=[
+                        ContentItem(
+                            type=Type.IMAGE_BINARY,
+                            binary=png_image_bytes_great_wave,
+                        ),
+                        ContentItem(
+                            type=Type.TEXT,
+                            content=test_prompt,
+                        ),
+                    ],
+                )
             ],
             metadata={"foo": "bar"},
             conversation_id="123",
@@ -316,12 +323,16 @@ def test_infer_from_file_to_file_with_images():
             messages=[
                 Message(
                     role=Role.USER,
-                    type=Type.IMAGE_BINARY,
-                    binary=png_image_bytes_logo,
-                ),
-                Message(
-                    content="Describe the high-level theme of the image in few words!",
-                    role=Role.USER,
+                    content=[
+                        ContentItem(
+                            type=Type.IMAGE_BINARY,
+                            binary=png_image_bytes_logo,
+                        ),
+                        ContentItem(
+                            type=Type.TEXT,
+                            content=test_prompt,
+                        ),
+                    ],
                 ),
             ],
             metadata={"umi": "bar"},
@@ -329,12 +340,27 @@ def test_infer_from_file_to_file_with_images():
         )
         input_path = Path(output_temp_dir) / "foo" / "input.jsonl"
         _setup_input_conversations(str(input_path), [conversation_1, conversation_2])
-        expected_result = [
+
+        output_path = Path(output_temp_dir) / "b" / "output.jsonl"
+        inference_config = _get_default_inference_config()
+        inference_config.output_path = str(output_path)
+
+        result = engine.infer(
+            [conversation_1, conversation_2],
+            inference_config,
+        )
+        with open(output_path) as f:
+            parsed_conversations = []
+            for line in f:
+                parsed_conversations.append(Conversation.from_json(line))
+            assert result == parsed_conversations
+
+        expected_results = [
             Conversation(
                 messages=[
                     *conversation_1.messages,
                     Message(
-                        content="2 boats in a wave",
+                        content="",
                         role=Role.ASSISTANT,
                     ),
                 ],
@@ -345,7 +371,7 @@ def test_infer_from_file_to_file_with_images():
                 messages=[
                     *conversation_2.messages,
                     Message(
-                        content="4x4 square.",
+                        content="",
                         role=Role.ASSISTANT,
                     ),
                 ],
@@ -353,18 +379,23 @@ def test_infer_from_file_to_file_with_images():
                 conversation_id="133",
             ),
         ]
+        # Verify that the model response isn't empty, and verify that the results
+        # are as expected except for the response content.
+        assert len(result) == len(expected_results)
+        for expected, actual in zip(expected_results, result):
+            assert actual.messages[-1].content
+            actual_dict = actual.to_dict()
+            actual_dict["messages"][-1]["content"] = ""
+            actual = Conversation.from_dict(actual_dict)
+            assert actual == expected
 
-        output_path = Path(output_temp_dir) / "b" / "output.jsonl"
-        inference_config = _get_default_inference_config()
-        inference_config.output_path = str(output_path)
 
-        result = engine.infer_online(
-            [conversation_1, conversation_2],
-            inference_config,
-        )
-        assert result == expected_result
-        with open(output_path) as f:
-            parsed_conversations = []
-            for line in f:
-                parsed_conversations.append(Conversation.from_json(line))
-            assert expected_result == parsed_conversations
+def test_unsupported_model_raises_error():
+    model_params = ModelParams(
+        model_name="MlpEncoder",
+        tokenizer_name="gpt2",
+        tokenizer_pad_token="<|endoftext|>",
+        load_pretrained_weights=False,
+    )
+    with pytest.raises(ValueError, match="requires a generation config"):
+        NativeTextInferenceEngine(model_params)

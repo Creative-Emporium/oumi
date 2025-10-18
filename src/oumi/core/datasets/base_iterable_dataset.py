@@ -1,3 +1,17 @@
+# Copyright 2025 - Oumi
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import abc
 from collections.abc import Iterable
 from typing import Any, Optional
@@ -15,12 +29,12 @@ class BaseIterableDataset(IterDataPipe, abc.ABC):
     dataset_path: Optional[str] = None
     default_dataset: Optional[str] = None
     default_subset: Optional[str] = None
-    trust_remote_code: bool
+    trust_remote_code: bool = False
 
     def __init__(
         self,
         *,
-        dataset_name: Optional[str],
+        dataset_name: Optional[str] = None,
         dataset_path: Optional[str] = None,
         subset: Optional[str] = None,
         split: Optional[str] = None,
@@ -51,6 +65,7 @@ class BaseIterableDataset(IterDataPipe, abc.ABC):
         self.dataset_path = dataset_path
         self.dataset_subset = subset or self.default_subset
         self.split = split
+        self.trust_remote_code = trust_remote_code
         self.stream = stream
         self._data = self._load_data()
 
@@ -66,8 +81,10 @@ class BaseIterableDataset(IterDataPipe, abc.ABC):
         """Iterates over the raw dataset."""
         yield from self.data
 
-    def to_hf(self) -> datasets.IterableDataset:
+    def to_hf(self, return_iterable: bool = True) -> datasets.IterableDataset:
         """Converts the dataset to a Hugging Face dataset."""
+        if not return_iterable:
+            raise NotImplementedError("Only returning IterableDataset is supported.")
         return datasets.IterableDataset.from_generator(self.__iter__)
 
     @property

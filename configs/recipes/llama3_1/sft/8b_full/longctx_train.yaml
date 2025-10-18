@@ -1,17 +1,23 @@
-# Configuration for fine-tuning Llama 3.8B model with long context
+# Config for fine-tuning Llama 3.8B model with long context.
 #
-# Run command for 8x40GB A100 GPUs
-# accelerate launch \
+# Usage (for 8xA100-40GB GPUs):
+#   accelerate launch \
 #     --config_file configs/recipes/llama3_1/sft/8b_full/accelerate.yaml \
 #     --use_fsdp \
 #     --num_processes 8 \
 #     --dynamo_backend inductor \
 #     --mixed_precision no \
-#     -m oumi.train \
+#     -m oumi train \
 #     -c "configs/recipes/llama3_1/sft/8b_full/longctx_train.yaml"
+#
+# See Also:
+#   - Documentation: https://oumi.ai/docs/en/latest/user_guides/train/train.html
+#   - Config class: oumi.core.configs.TrainingConfig
+#   - Config source: https://github.com/oumi-ai/oumi/blob/main/src/oumi/core/configs/training_config.py
+#   - Other training configs: configs/**/*train.yaml
 
 model:
-  model_name: "meta-llama/Meta-Llama-3.1-8B-Instruct"
+  model_name: "meta-llama/Llama-3.1-8B-Instruct"
   model_max_length: 32_768
   torch_dtype_str: "bfloat16" # Train in BF16 to save memory
   attn_implementation: "sdpa" # pytorch native flash-attention, helps reduce vram
@@ -20,7 +26,7 @@ model:
   enable_liger_kernel: True # Helps reduce required vram
 
 training:
-  trainer_type: TRL_SFT
+  trainer_type: "TRL_SFT"
   learning_rate: 2.0e-05
   output_dir: "output/llama8b.longctx.fft"
 
@@ -41,7 +47,8 @@ data:
       - dataset_name: "HuggingFaceFW/fineweb-edu"
         subset: "sample-10BT"
         split: "train"
+        dataset_kwargs:
+          seq_length: 32_768
     target_col: "text"
-    use_async_dataset: True
     stream: True
     pack: True

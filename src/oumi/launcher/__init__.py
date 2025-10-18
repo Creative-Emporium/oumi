@@ -1,13 +1,30 @@
+# Copyright 2025 - Oumi
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Launcher module for the Oumi (Open Universal Machine Intelligence) library.
 
 This module provides functionality for launching and managing jobs across various
 cloud platforms.
 
 Example:
-    >>> from oumi.launcher import Launcher, JobConfig
+    >>> from oumi.launcher import Launcher, JobConfig, JobResources
     >>> launcher = Launcher()
-    >>> job_config = JobConfig(name="my_job", command="python train.py")
-    >>> launcher.run(job_config)
+    >>> job_resources = JobResources(cloud="local")
+    >>> job_config = JobConfig(
+    ...     name="my_job", resources=job_resources, run="python train.py"
+    ... )
+    >>> job_status = launcher.up(job_config, cluster_name="my_cluster")
 
 Note:
     This module integrates with various cloud platforms. Ensure that the necessary

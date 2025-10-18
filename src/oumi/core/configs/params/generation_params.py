@@ -1,24 +1,43 @@
+# Copyright 2025 - Oumi
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from oumi.core.configs.params.base_params import BaseParams
-from oumi.core.configs.params.remote_params import RemoteParams
+from oumi.core.configs.params.guided_decoding_params import GuidedDecodingParams
 
 
 @dataclass
 class GenerationParams(BaseParams):
-    max_new_tokens: int = 256
+    max_new_tokens: int = 1024
     """The maximum number of new tokens to generate.
 
     This limits the length of the generated text to prevent excessively long outputs.
-    Default is 256 tokens.
+    Default is 1024 tokens.
     """
 
-    batch_size: int = 2
+    batch_size: Optional[int] = 1
     """The number of sequences to generate in parallel.
 
-    Larger batch sizes can improve throughput but require more memory.
-    Default is 2.
+    Larger batch sizes can improve throughput but require more memory. Default is 1.
+
+    The value must either be positive or None, in which case the behavior is dependent
+    on the downstream application. For example, LM Harness will automatically determine
+    the largest batch size that will fit in memory.
+
+    For inference, this parameter is only used in `NativeTextInferenceEngine`.
     """
 
     exclude_prompt_from_response: bool = True
@@ -61,9 +80,6 @@ class GenerationParams(BaseParams):
     """List of token ids for which the API will stop generating further tokens. This
     is only supported in `VLLMInferenceEngine` and `NativeTextInferenceEngine`."""
 
-    remote_params: Optional[RemoteParams] = None
-    """Parameters for running inference against a remote API."""
-
     logit_bias: dict[Any, float] = field(default_factory=dict)
     """Modify the likelihood of specified tokens appearing in the completion.
 
@@ -83,10 +99,43 @@ class GenerationParams(BaseParams):
     Default is 0.0 (no minimum threshold).
     """
 
+    use_cache: bool = False
+    """Whether to use the model's internal cache (key/value attentions) to speed up
+    generation.
+    Default is False.
+    """
+
+    num_beams: int = 1
+    """Number of beams for beam search. 1 means no beam search. Larger number of beams
+    will make for a more thorough search for probable output token sequences, at
+    the cost of increased computation time.
+    Default is 1.
+    """
+
+    use_sampling: bool = False
+    """Whether to use sampling for next-token generation. If False, uses greedy
+    decoding.
+    Default is False."""
+
+    guided_decoding: Optional[GuidedDecodingParams] = None
+    """Parameters for guided decoding."""
+
+    skip_special_tokens: bool = True
+    """Whether to skip special tokens when decoding the generated text.
+
+    When True (default), special tokens like <eos>, <pad>, etc. are removed from
+    the output text. When False, these tokens are included in the decoded text.
+    This can be useful for models that use special tokens as part of their output
+    format (e.g., reasoning tokens, tool call markers).
+    """
+
     def __post_init__(self):
         """Validates generation-specific parameters."""
-        if self.batch_size < 1:
-            raise ValueError("Batch size must be at least 1.")
+        if self.batch_size is not None and self.batch_size < 1:
+            raise ValueError("Batch size must be positive.")
+
+        if self.num_beams < 1:
+            raise ValueError("num_beams must be strictly larger than 0.")
 
         if self.temperature < 0:
             raise ValueError("Temperature must be non-negative.")

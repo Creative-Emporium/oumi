@@ -27,8 +27,8 @@ MODEL_REPO="${REPO}/${MODEL}"
 # Various setup for running on Polaris.
 source ${PBS_O_WORKDIR}/scripts/polaris/polaris_init.sh
 
-set -x # Print command with expanded variables
+set -x
 
-huggingface-cli download "${MODEL_REPO}"
+hf download "${MODEL_REPO}"
 
 echo "Polaris job is all done!"

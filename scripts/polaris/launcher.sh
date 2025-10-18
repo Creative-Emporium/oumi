@@ -107,14 +107,14 @@ ssh -S ~/.ssh/control-%h-%p-%r "${POLARIS_USER}@polaris.alcf.anl.gov" "bash -s $
   # This directory must exist for the run to work, as Polaris won't create them.
   mkdir -p /eagle/community_ai/jobs/logs/$USER/
 
-  set -x  # Print qsub command with expanded variables
+  set -x
   JOB_ID=$(qsub -l select=${POLARIS_NODES}:system=polaris -q ${POLARIS_QUEUE} -o /eagle/community_ai/jobs/logs/$USER/ -e /eagle/community_ai/jobs/logs/$USER/ ${JOB_PATH})
   QSUB_RESULT=$?
   set +x  # Turn-off printing
 
   if (test "$QSUB_RESULT" -ne 0) || [ -z "$JOB_ID" ]
   then
-      echo "Job submission ('qsub') failed with eror code: $QSUB_RESULT"
+      echo "Job submission ('qsub') failed with error code: $QSUB_RESULT"
       exit 1
   fi
   echo "Job id: ${JOB_ID}"

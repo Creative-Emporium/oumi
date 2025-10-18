@@ -1,3 +1,17 @@
+# Copyright 2025 - Oumi
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from typing import Any
 
 import torch
@@ -8,7 +22,7 @@ from oumi.core.tokenizers import BaseTokenizer
 
 
 class BasePretrainingDataset(BaseIterableDataset):
-    """Abstract base class for pretraining iterable datasets.
+    """Base class for pretraining iterable datasets.
 
     This class extends BaseIterableDataset to provide functionality specific to
     pretraining tasks.
@@ -20,18 +34,18 @@ class BasePretrainingDataset(BaseIterableDataset):
 
     Example:
         >>> from transformers import AutoTokenizer
-        >>> from oumi.core.datasets import PretrainingDataset
-        >>>
-        >>> tokenizer = AutoTokenizer.from_pretrained("gpt2")
-        >>> dataset = PretrainingDataset(
+        >>> from oumi.builders import build_tokenizer
+        >>> from oumi.core.configs import ModelParams
+        >>> from oumi.core.datasets import BasePretrainingDataset
+        >>> tokenizer = build_tokenizer(ModelParams(model_name="gpt2"))
+        >>> dataset = BasePretrainingDataset(
         ...     dataset_name="wikimedia/wikipedia",
         ...     subset="20231101.en",
+        ...     split="train",
         ...     tokenizer=tokenizer,
         ...     seq_length=512
         ... )
-        >>>
-        >>> for batch in dataset:
-        ...     print(batch)  # Process the batch
+        >>> example = next(iter(dataset))
     """
 
     def __init__(
@@ -66,7 +80,7 @@ class BasePretrainingDataset(BaseIterableDataset):
         """Iterates over the dataset and yields samples of a specified sequence length.
 
         The underlying dataset is a stream of documents. Each document is expected to
-        containt a text field `self._dataset_text_field` that will be tokenized.
+        contain a text field `self._dataset_text_field` that will be tokenized.
         Training samples are then yielded in sequences of length `self.seq_length`.
 
         Given this iterator might return samples from different documents, we optionally

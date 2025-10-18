@@ -1,3 +1,17 @@
+# Copyright 2025 - Oumi
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Porting the Alpaca dataset with Oumi.
 
 For more info see:
@@ -45,20 +59,19 @@ class AlpacaDataset(BaseSftDataset):
         """Preprocesses the inputs of the example and returns a dictionary.
 
         Args:
-            example (dict): The example containing the input and instruction.
+            example (dict or Pandas Series): An example containing `input` (optional),
+                `instruction`, and `output` entries.
 
         Returns:
-            dict: The preprocessed inputs as a dictionary.
+            dict: The input example converted to Alpaca dictionary format.
 
         """
         messages = []
 
         # Use default Alpaca user prompt template
-        if example.get("input") is not None and len(example["input"]) > 0:
+        if ("input" in example) and len(example["input"]) > 0:
             # This example has both an instruction and a user input.
-            user_prompt = """{instruction}\n\n### Input:\n{input}""".format(
-                instruction=example["instruction"], input=example["input"]
-            )
+            user_prompt = f"{example['instruction']}\n\n### Input:\n{example['input']}"
             system_prompt = self.system_prompt_with_context
         else:
             user_prompt = cast(str, example["instruction"])
