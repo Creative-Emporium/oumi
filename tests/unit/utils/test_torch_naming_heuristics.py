@@ -1,5 +1,3 @@
-import os
-
 import pytest
 import torch
 import torch.nn as nn
@@ -10,12 +8,20 @@ from transformers import (
     AutoModelForCausalLM,
     AutoModelForVision2Seq,
 )
+from transformers.models.mllama.modeling_mllama import (
+    MllamaCrossAttentionDecoderLayer,
+    MllamaSelfAttentionDecoderLayer,
+    MllamaVisionEncoderLayer,
+)
 
 from oumi.utils.torch_naming_heuristics import (
     disable_dropout,
     group_trainable_params,
     guess_transformer_layer_cls,
+    resolve_transformer_layer_cls_string_as_module_set,
+    simplify_transformer_layer_cls_string,
 )
+from tests.markers import requires_hf_token
 
 
 def test_disable_dropout():
@@ -78,12 +84,32 @@ MODEL_CONFIGS = [
         AutoModelForCausalLM,
     ),
     (
-        "meta-llama/Meta-Llama-3.1-8B-Instruct",
+        "meta-llama/Llama-3.3-70B-Instruct",
         "LlamaDecoderLayer",
         AutoModelForCausalLM,
     ),
     (
-        "meta-llama/Meta-Llama-3.1-70B-Instruct",
+        "meta-llama/Llama-3.2-1B-Instruct",
+        "LlamaDecoderLayer",
+        AutoModelForCausalLM,
+    ),
+    (
+        "meta-llama/Llama-3.2-3B-Instruct",
+        "LlamaDecoderLayer",
+        AutoModelForCausalLM,
+    ),
+    (
+        "meta-llama/Llama-3.1-8B-Instruct",
+        "LlamaDecoderLayer",
+        AutoModelForCausalLM,
+    ),
+    (
+        "meta-llama/Llama-3.1-70B-Instruct",
+        "LlamaDecoderLayer",
+        AutoModelForCausalLM,
+    ),
+    (
+        "meta-llama/Llama-3.1-405B-Instruct",
         "LlamaDecoderLayer",
         AutoModelForCausalLM,
     ),
@@ -118,14 +144,10 @@ def _load_model_architecture(model_name, builder_class):
 
 
 @pytest.mark.skip("Very slow test. Only run occasionally if changing that logic.")
-@pytest.mark.skipif(
-    "HF_TOKEN" not in os.environ,
-    reason="Multiple models are gated and require cannot "
-    "be downloaded without a valid HF_TOKEN",
-)
 @pytest.mark.parametrize(
     "model_name, expected_layer_name, builder_class", MODEL_CONFIGS
 )
+@requires_hf_token()
 def test_guess_transformer_layer_cls(model_name, expected_layer_name, builder_class):
     _config, model = _load_model_architecture(model_name, builder_class)
 
@@ -134,3 +156,44 @@ def test_guess_transformer_layer_cls(model_name, expected_layer_name, builder_cl
 
     # Check if the guessed class name matches the expected name
     assert layer_cls.__name__ == expected_layer_name
+
+
+@pytest.mark.parametrize(
+    "input_name, simplified_name",
+    [
+        ("", ""),
+        ("  \t\n", ""),
+        ("Foo", "Foo"),
+        (" Foo ", "Foo"),
+        (" Foo, Bar ", "Foo,Bar"),
+        ("zoo.Foo, Bar ", "Foo,Bar"),
+        ("zoo.Foo,moo.Bar ", "Foo,Bar"),
+        ("zoo.Foo,,,Zzz,moo.Bar ", "Foo,Zzz,Bar"),
+    ],
+)
+def test_simplify_transformer_layer_cls_string(input_name: str, simplified_name: str):
+    assert simplify_transformer_layer_cls_string(input_name) == simplified_name
+
+
+def test_resolve_transformer_layer_cls_string_as_module_set():
+    assert resolve_transformer_layer_cls_string_as_module_set("") == set()
+
+    assert resolve_transformer_layer_cls_string_as_module_set(
+        "transformers.models.mllama.modeling_mllama.MllamaCrossAttentionDecoderLayer"
+    ) == set(
+        {
+            MllamaCrossAttentionDecoderLayer,
+        }
+    )
+
+    assert resolve_transformer_layer_cls_string_as_module_set(
+        "transformers.models.mllama.modeling_mllama.MllamaSelfAttentionDecoderLayer,"
+        "transformers.models.mllama.modeling_mllama.MllamaCrossAttentionDecoderLayer,"
+        "transformers.models.mllama.modeling_mllama.MllamaVisionEncoderLayer"
+    ) == set(
+        {
+            MllamaSelfAttentionDecoderLayer,
+            MllamaCrossAttentionDecoderLayer,
+            MllamaVisionEncoderLayer,
+        }
+    )

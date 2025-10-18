@@ -1,7 +1,34 @@
+# Copyright 2025 - Oumi
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import io
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from enum import Enum
+from typing import Optional
 
 from oumi.core.configs import JobConfig
+
+
+class JobState(Enum):
+    """Enum to hold the state of a job."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 @dataclass
@@ -28,6 +55,10 @@ class JobStatus:
     #: canceled).
     done: bool
 
+    #: The state of the job.
+    #: For more fine-grained information about the job, see the status field.
+    state: JobState
+
 
 class BaseCluster(ABC):
     """Base class for a compute cluster (job queue)."""
@@ -48,8 +79,8 @@ class BaseCluster(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def stop_job(self, job_id: str) -> JobStatus:
-        """Stops the specified job on this cluster."""
+    def cancel_job(self, job_id: str) -> JobStatus:
+        """Cancels the specified job on this cluster."""
         raise NotImplementedError
 
     @abstractmethod
@@ -58,6 +89,24 @@ class BaseCluster(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def stop(self) -> None:
+        """Stops the current cluster."""
+        raise NotImplementedError
+
+    @abstractmethod
     def down(self) -> None:
         """Tears down the current cluster."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_logs_stream(
+        self, cluster_name: str, job_id: Optional[str] = None
+    ) -> io.TextIOBase:
+        """Gets a stream that tails the logs of the target job.
+
+        Args:
+            cluster_name: The name of the cluster the job was run in.
+            job_id: The ID of the job to tail the logs of. If unspecified, the most
+                recent job will be used.
+        """
         raise NotImplementedError

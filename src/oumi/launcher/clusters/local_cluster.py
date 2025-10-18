@@ -1,3 +1,18 @@
+# Copyright 2025 - Oumi
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import io
 import uuid
 from copy import deepcopy
 from typing import Any, Optional
@@ -79,8 +94,8 @@ class LocalCluster(BaseCluster):
             job.cluster = self._name
         return jobs
 
-    def stop_job(self, job_id: str) -> JobStatus:
-        """Stops the specified job on this cluster."""
+    def cancel_job(self, job_id: str) -> JobStatus:
+        """Cancels the specified job on this cluster."""
         self._client.cancel(job_id)
         job = self.get_job(job_id)
         if job is None:
@@ -104,7 +119,23 @@ class LocalCluster(BaseCluster):
         status.cluster = self._name
         return status
 
+    def stop(self) -> None:
+        """Cancels all jobs, running or queued."""
+        for job in self.get_jobs():
+            self.cancel_job(job.id)
+
     def down(self) -> None:
         """Cancels all jobs, running or queued."""
         for job in self.get_jobs():
-            self.stop_job(job.id)
+            self.cancel_job(job.id)
+
+    def get_logs_stream(
+        self, cluster_name: str, job_id: Optional[str] = None
+    ) -> io.TextIOBase:
+        """Gets a stream that tails the logs of the target job.
+
+        Args:
+            cluster_name: The name of the cluster the job was run in.
+            job_id: The ID of the job to tail the logs of.
+        """
+        raise NotImplementedError

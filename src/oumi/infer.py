@@ -1,94 +1,54 @@
-import argparse
+# Copyright 2025 - Oumi
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from typing import Optional
 
+from oumi.builders.inference_engines import build_inference_engine
 from oumi.core.configs import InferenceConfig, InferenceEngineType
 from oumi.core.inference import BaseInferenceEngine
-from oumi.core.types.conversation import Conversation, Message, Role, Type
-from oumi.inference import (
-    AnthropicInferenceEngine,
-    LlamaCppInferenceEngine,
-    NativeTextInferenceEngine,
-    RemoteInferenceEngine,
-    VLLMInferenceEngine,
+from oumi.core.types.conversation import (
+    ContentItem,
+    Conversation,
+    Message,
+    Role,
+    Type,
 )
-from oumi.utils.image_utils import load_image_png_bytes_from_path
 from oumi.utils.logging import logger
 
 
-def _get_engine(config: InferenceConfig) -> BaseInferenceEngine:
+def get_engine(config: InferenceConfig) -> BaseInferenceEngine:
     """Returns the inference engine based on the provided config."""
     if config.engine is None:
         logger.warning(
             "No inference engine specified. Using the default 'native' engine."
         )
-        return NativeTextInferenceEngine(config.model)
-    elif config.engine == InferenceEngineType.NATIVE:
-        return NativeTextInferenceEngine(config.model)
-    elif config.engine == InferenceEngineType.VLLM:
-        return VLLMInferenceEngine(config.model)
-    elif config.engine == InferenceEngineType.LLAMACPP:
-        return LlamaCppInferenceEngine(config.model)
-    elif config.engine == InferenceEngineType.ANTHROPIC:
-        return AnthropicInferenceEngine(config.model)
-    elif config.engine == InferenceEngineType.REMOTE:
-        return RemoteInferenceEngine(config.model)
-    else:
-        logger.warning(
-            f"Unsupported inference engine: {config.engine}. "
-            "Falling back to the default 'native' engine."
-        )
-        return NativeTextInferenceEngine(config.model)
-
-
-def parse_cli():
-    """Parses command line arguments and returns the configuration filename."""
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "-c", "--config", default=None, help="Path to the configuration file"
+    return build_inference_engine(
+        engine_type=config.engine or InferenceEngineType.NATIVE,
+        model_params=config.model,
+        remote_params=config.remote_params,
     )
-    parser.add_argument(
-        "-i",
-        "--image",
-        type=argparse.FileType("rb"),
-        help="File path of an input image to be used with `image+text` VLLMs.",
-    )
-    args, unknown = parser.parse_known_args()
-    return args.config, args.image, unknown
-
-
-def main():
-    """Main entry point for running inference using Oumi.
-
-    Training arguments are fetched from the following sources, ordered by
-    decreasing priority:
-    1. [Optional] Arguments provided as CLI arguments, in dotfile format
-    2. [Optional] Arguments provided in a yaml config file
-    3. Default arguments values defined in the data class
-    """
-    # Load configuration
-    config_path, input_image_filepath, arg_list = parse_cli()
-
-    config: InferenceConfig = InferenceConfig.from_yaml_and_arg_list(
-        config_path, arg_list, logger=logger
-    )
-    config.validate()
-
-    input_image_png_bytes: Optional[bytes] = (
-        load_image_png_bytes_from_path(input_image_filepath)
-        if input_image_filepath
-        else None
-    )
-
-    # Run inference
-    infer_interactive(config, input_image_bytes=input_image_png_bytes)
 
 
 def infer_interactive(
-    config: InferenceConfig, *, input_image_bytes: Optional[bytes] = None
+    config: InferenceConfig,
+    *,
+    input_image_bytes: Optional[list[bytes]] = None,
+    system_prompt: Optional[str] = None,
 ) -> None:
     """Interactively provide the model response for a user-provided input."""
     # Create engine up front to avoid reinitializing it for each input.
-    inference_engine = _get_engine(config)
+    inference_engine = get_engine(config)
     while True:
         try:
             input_text = input("Enter your input prompt: ")
@@ -100,6 +60,7 @@ def infer_interactive(
             inputs=[
                 input_text,
             ],
+            system_prompt=system_prompt,
             input_image_bytes=input_image_bytes,
             inference_engine=inference_engine,
         )
@@ -115,7 +76,8 @@ def infer(
     inputs: Optional[list[str]] = None,
     inference_engine: Optional[BaseInferenceEngine] = None,
     *,
-    input_image_bytes: Optional[bytes] = None,
+    input_image_bytes: Optional[list[bytes]] = None,
+    system_prompt: Optional[str] = None,
 ) -> list[Conversation]:
     """Runs batch inference for a model using the provided configuration.
 
@@ -124,42 +86,57 @@ def infer(
         inputs: A list of inputs for inference.
         inference_engine: The engine to use for inference. If unspecified, the engine
             will be inferred from `config`.
-        input_image_bytes: An input PNG image bytes to be used with `image+text` VLLMs.
-            Only used in interactive mode.
+        input_image_bytes: A list of input PNG image bytes to be used with `image+text`
+            VLMs. Only used in interactive mode.
+        system_prompt: System prompt for task-specific instructions.
 
     Returns:
         object: A list of model responses.
     """
     if not inference_engine:
-        inference_engine = _get_engine(config)
-
-    image_messages = (
-        [
-            Message(
-                binary=input_image_bytes,
-                type=Type.IMAGE_BINARY,
-                role=Role.USER,
-            )
-        ]
-        if input_image_bytes is not None
-        else []
-    )
+        inference_engine = get_engine(config)
 
     # Pass None if no conversations are provided.
     conversations = None
     if inputs is not None and len(inputs) > 0:
-        conversations = [
-            Conversation(
-                messages=(image_messages + [Message(content=content, role=Role.USER)])
-            )
-            for content in inputs
-        ]
+        system_messages = (
+            [Message(role=Role.SYSTEM, content=system_prompt)] if system_prompt else []
+        )
+        if input_image_bytes is None or len(input_image_bytes) == 0:
+            conversations = [
+                Conversation(
+                    messages=(
+                        system_messages + [Message(role=Role.USER, content=content)]
+                    )
+                )
+                for content in inputs
+            ]
+        else:
+            conversations = [
+                Conversation(
+                    messages=(
+                        system_messages
+                        + [
+                            Message(
+                                role=Role.USER,
+                                content=(
+                                    [
+                                        ContentItem(
+                                            type=Type.IMAGE_BINARY, binary=image_bytes
+                                        )
+                                        for image_bytes in input_image_bytes
+                                    ]
+                                    + [ContentItem(type=Type.TEXT, content=content)]
+                                ),
+                            )
+                        ]
+                    )
+                )
+                for content in inputs
+            ]
+
     generations = inference_engine.infer(
         input=conversations,
         inference_config=config,
     )
     return generations
-
-
-if __name__ == "__main__":
-    main()

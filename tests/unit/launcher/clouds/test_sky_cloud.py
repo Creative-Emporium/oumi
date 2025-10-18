@@ -4,7 +4,7 @@ import pytest
 import sky
 
 from oumi.core.configs import JobConfig, JobResources, StorageMount
-from oumi.core.launcher import JobStatus
+from oumi.core.launcher import JobState, JobStatus
 from oumi.core.registry import REGISTRY, RegistryType
 from oumi.launcher.clients.sky_client import SkyClient
 from oumi.launcher.clouds.sky_cloud import SkyCloud
@@ -16,7 +16,11 @@ from oumi.launcher.clusters.sky_cluster import SkyCluster
 #
 @pytest.fixture
 def mock_sky_client():
-    yield Mock(spec=SkyClient)
+    with patch("oumi.launcher.clouds.sky_cloud.SkyClient") as client:
+        client.SupportedClouds = SkyClient.SupportedClouds
+        client_instance = Mock(spec=SkyClient)
+        client.return_value = client_instance
+        yield client_instance
 
 
 @pytest.fixture
@@ -67,6 +71,7 @@ def test_sky_cloud_up_cluster(mock_sky_client, mock_sky_cluster):
         status="",
         metadata="",
         done=False,
+        state=JobState.PENDING,
     )
     mock_gcp_cluster = Mock(spec=sky.clouds.GCP)
     mock_gcp_handler = Mock()
@@ -101,7 +106,7 @@ def test_sky_cloud_up_cluster(mock_sky_client, mock_sky_cluster):
             "handle": mock_gcp_handler,
         },
         {
-            "name": "down_cluster_name",
+            "name": "stop_cluster_name",
             "status": sky.ClusterStatus.STOPPED,
             "handle": mock_gcp_handler,
         },
@@ -122,7 +127,7 @@ def test_sky_cloud_up_cluster(mock_sky_client, mock_sky_cluster):
         },
     ]
     mock_sky_client.launch.return_value = expected_job_status
-    cloud = SkyCloud("gcp", mock_sky_client)
+    cloud = SkyCloud("gcp")
     job_status = cloud.up_cluster(_get_default_job("gcp"), "new_cluster_name")
     mock_sky_client.launch.assert_called_once_with(
         _get_default_job("gcp"), "new_cluster_name"
@@ -138,6 +143,7 @@ def test_sky_cloud_up_cluster_kwargs(mock_sky_client, mock_sky_cluster):
         status="",
         metadata="",
         done=False,
+        state=JobState.PENDING,
     )
     mock_gcp_cluster = Mock(spec=sky.clouds.GCP)
     mock_gcp_handler = Mock()
@@ -183,7 +189,7 @@ def test_sky_cloud_up_cluster_kwargs(mock_sky_client, mock_sky_cluster):
         },
     ]
     mock_sky_client.launch.return_value = expected_job_status
-    cloud = SkyCloud("gcp", mock_sky_client)
+    cloud = SkyCloud("gcp")
     job_status = cloud.up_cluster(
         _get_default_job("gcp"), "new_cluster_name", custom_kwarg=1
     )
@@ -201,6 +207,7 @@ def test_sky_cloud_up_cluster_no_name(mock_sky_client, mock_sky_cluster):
         status="",
         metadata="",
         done=False,
+        state=JobState.PENDING,
     )
     mock_gcp_cluster = Mock(spec=sky.clouds.GCP)
     mock_gcp_handler = Mock()
@@ -246,14 +253,14 @@ def test_sky_cloud_up_cluster_no_name(mock_sky_client, mock_sky_cluster):
         },
     ]
     mock_sky_client.launch.return_value = expected_job_status
-    cloud = SkyCloud("gcp", mock_sky_client)
+    cloud = SkyCloud("gcp")
     job_status = cloud.up_cluster(_get_default_job("gcp"), None)
     mock_sky_client.launch.assert_called_once_with(_get_default_job("gcp"), None)
     assert job_status == expected_job_status
 
 
 def test_sky_cloud_list_clusters_gcp(mock_sky_client):
-    cloud = SkyCloud("gcp", mock_sky_client)
+    cloud = SkyCloud("gcp")
     mock_gcp_cluster = Mock(spec=sky.clouds.GCP)
     mock_gcp_handler = Mock()
     mock_gcp_handler.launched_resources = Mock()
@@ -275,7 +282,7 @@ def test_sky_cloud_list_clusters_gcp(mock_sky_client):
             "handle": mock_gcp_handler,
         },
         {
-            "name": "down_cluster_name",
+            "name": "stop_cluster_name",
             "status": sky.ClusterStatus.STOPPED,
             "handle": mock_gcp_handler,
         },
@@ -301,7 +308,7 @@ def test_sky_cloud_list_clusters_gcp(mock_sky_client):
 
 
 def test_sky_cloud_list_clusters_runpod(mock_sky_client):
-    cloud = SkyCloud("runpod", mock_sky_client)
+    cloud = SkyCloud("runpod")
     mock_gcp_cluster = Mock(spec=sky.clouds.GCP)
     mock_gcp_handler = Mock()
     mock_gcp_handler.launched_resources = Mock()
@@ -339,7 +346,7 @@ def test_sky_cloud_list_clusters_runpod(mock_sky_client):
 
 
 def test_sky_cloud_list_clusters_lambda(mock_sky_client):
-    cloud = SkyCloud("lambda", mock_sky_client)
+    cloud = SkyCloud("lambda")
     mock_gcp_cluster = Mock(spec=sky.clouds.GCP)
     mock_gcp_handler = Mock()
     mock_gcp_handler.launched_resources = Mock()
@@ -377,7 +384,7 @@ def test_sky_cloud_list_clusters_lambda(mock_sky_client):
 
 
 def test_sky_cloud_list_clusters_lambda_no_cluster(mock_sky_client):
-    cloud = SkyCloud("lambda", mock_sky_client)
+    cloud = SkyCloud("lambda")
     mock_gcp_cluster = Mock(spec=sky.clouds.GCP)
     mock_gcp_handler = Mock()
     mock_gcp_handler.launched_resources = Mock()
@@ -406,7 +413,7 @@ def test_sky_cloud_list_clusters_lambda_no_cluster(mock_sky_client):
 
 
 def test_sky_cloud_list_clusters_lambda_multiple_cluster(mock_sky_client):
-    cloud = SkyCloud("lambda", mock_sky_client)
+    cloud = SkyCloud("lambda")
     mock_gcp_cluster = Mock(spec=sky.clouds.GCP)
     mock_gcp_handler = Mock()
     mock_gcp_handler.launched_resources = Mock()
@@ -458,7 +465,7 @@ def test_sky_cloud_list_clusters_lambda_multiple_cluster(mock_sky_client):
 
 
 def test_sky_cloud_list_clusters_invalid_cloud(mock_sky_client):
-    cloud = SkyCloud("fake_cloud", mock_sky_client)
+    cloud = SkyCloud("fake_cloud")
     mock_gcp_cluster = Mock(spec=sky.clouds.GCP)
     mock_gcp_handler = Mock()
     mock_gcp_handler.launched_resources = Mock()
@@ -506,7 +513,7 @@ def test_sky_cloud_list_clusters_invalid_cloud(mock_sky_client):
 
 
 def test_sky_cloud_get_cluster_gcp_success(mock_sky_client):
-    cloud = SkyCloud("gcp", mock_sky_client)
+    cloud = SkyCloud("gcp")
     mock_gcp_cluster = Mock(spec=sky.clouds.GCP)
     mock_gcp_handler = Mock()
     mock_gcp_handler.launched_resources = Mock()
@@ -545,7 +552,7 @@ def test_sky_cloud_get_cluster_gcp_success(mock_sky_client):
 
 
 def test_sky_cloud_get_cluster_runpod_success(mock_sky_client):
-    cloud = SkyCloud("runpod", mock_sky_client)
+    cloud = SkyCloud("runpod")
     mock_gcp_cluster = Mock(spec=sky.clouds.GCP)
     mock_gcp_handler = Mock()
     mock_gcp_handler.launched_resources = Mock()
@@ -584,7 +591,7 @@ def test_sky_cloud_get_cluster_runpod_success(mock_sky_client):
 
 
 def test_sky_cloud_get_cluster_lambda_success(mock_sky_client):
-    cloud = SkyCloud("lambda", mock_sky_client)
+    cloud = SkyCloud("lambda")
     mock_gcp_cluster = Mock(spec=sky.clouds.GCP)
     mock_gcp_handler = Mock()
     mock_gcp_handler.launched_resources = Mock()
@@ -623,7 +630,7 @@ def test_sky_cloud_get_cluster_lambda_success(mock_sky_client):
 
 
 def test_sky_cloud_get_cluster_aws_success(mock_sky_client):
-    cloud = SkyCloud("aws", mock_sky_client)
+    cloud = SkyCloud("aws")
     mock_gcp_cluster = Mock(spec=sky.clouds.GCP)
     mock_gcp_handler = Mock()
     mock_gcp_handler.launched_resources = Mock()
@@ -662,7 +669,7 @@ def test_sky_cloud_get_cluster_aws_success(mock_sky_client):
 
 
 def test_sky_cloud_get_cluster_azure_success(mock_sky_client):
-    cloud = SkyCloud("azure", mock_sky_client)
+    cloud = SkyCloud("azure")
     mock_gcp_cluster = Mock(spec=sky.clouds.GCP)
     mock_gcp_handler = Mock()
     mock_gcp_handler.launched_resources = Mock()
@@ -701,7 +708,7 @@ def test_sky_cloud_get_cluster_azure_success(mock_sky_client):
 
 
 def test_sky_cloud_get_cluster_failure_wrong_cloud(mock_sky_client):
-    cloud = SkyCloud("gcp", mock_sky_client)
+    cloud = SkyCloud("gcp")
 
     mock_runpod_cluster = Mock(spec=sky.clouds.RunPod)
     mock_runpod_handler = Mock()
@@ -731,7 +738,7 @@ def test_sky_cloud_get_cluster_failure_wrong_cloud(mock_sky_client):
 
 
 def test_sky_cloud_get_cluster_failure_empty(mock_sky_client):
-    cloud = SkyCloud("gcp", mock_sky_client)
+    cloud = SkyCloud("gcp")
     mock_sky_client.status.return_value = []
     cluster = cloud.get_cluster("gcp_cluster")
     mock_sky_client.status.assert_called_once()

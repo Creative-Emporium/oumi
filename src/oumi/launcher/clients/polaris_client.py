@@ -1,6 +1,21 @@
+# Copyright 2025 - Oumi
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import functools
 import re
 import subprocess
+import time
 from dataclasses import dataclass
 from enum import Enum
 from getpass import getpass
@@ -9,7 +24,7 @@ from typing import Optional
 
 import pexpect
 
-from oumi.core.launcher import JobStatus
+from oumi.core.launcher import JobState, JobStatus
 from oumi.utils.logging import logger
 
 _CTRL_PATH = "-S ~/.ssh/control-%h-%p-%r"
@@ -75,7 +90,8 @@ class PolarisClient:
         PROD = "prod"
 
     _FINISHED_STATUS = "F"
-
+    _FAILED_STATUS = "E"
+    _RUNNING_STATUS = "R"
     _PROD_QUEUES = {
         "small",
         "medium",
@@ -93,6 +109,23 @@ class PolarisClient:
         """
         self._user = user
         self._refresh_creds()
+
+    def _get_job_state(self, status: str) -> JobState:
+        """Gets the state of the job.
+
+        Args:
+            status: The status of the job.
+
+        Returns:
+            The state of the job.
+        """
+        if status == self._FINISHED_STATUS:
+            return JobState.SUCCEEDED
+        elif status == self._FAILED_STATUS:
+            return JobState.FAILED
+        elif status == self._RUNNING_STATUS:
+            return JobState.RUNNING
+        return JobState.PENDING
 
     def _split_status_line(self, line: str, metadata: str) -> JobStatus:
         """Splits a status line into a JobStatus object.
@@ -123,13 +156,15 @@ class PolarisClient:
                 f"Invalid status line: {line}. "
                 f"Expected 11 fields, but found {len(fields)}."
             )
+        state = self._get_job_state(fields[9])
         return JobStatus(
             id=self._get_short_job_id(fields[0]),
             name=fields[3],
             status=fields[9],
             cluster=fields[2],
             metadata=metadata,
-            done=fields[9] == self._FINISHED_STATUS,
+            done=state in (JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELLED),
+            state=state,
         )
 
     def _get_short_job_id(self, job_id: str) -> str:
@@ -184,7 +219,7 @@ class PolarisClient:
         result = subprocess.run(command, shell=True, capture_output=True)
         if result.returncode != 0:
             return []
-        ssh_tunnel_pattern = r"control-polaris.alcf.anl.gov-.*-(.*)"
+        ssh_tunnel_pattern = r"control-polaris.alcf.anl.gov-[^-]*-(.*)"
         lines = result.stdout.decode("utf-8").strip().split("\n")
         users = set()
         for line in lines:
@@ -193,6 +228,10 @@ class PolarisClient:
                 users.add(match.group(1))
         return list(users)
 
+    def _compute_duration_debug_str(self, start_time: float) -> str:
+        duration_sec = time.perf_counter() - start_time
+        return f"Duration: {duration_sec:.2f} sec"
+
     @retry_auth
     def run_commands(self, commands: list[str]) -> PolarisResponse:
         """Runs the provided commands in a single SSH command.
@@ -200,27 +239,42 @@ class PolarisClient:
         Args:
             commands: The commands to run.
         """
-        ssh_cmd = f"ssh {_CTRL_PATH} {self._user}@polaris.alcf.anl.gov " " << 'EOF'"
+        ssh_cmd = f"ssh {_CTRL_PATH} {self._user}@polaris.alcf.anl.gov  << 'EOF'"
         eof_suffix = "EOF"
         new_cmd = "\n".join([ssh_cmd, *commands, eof_suffix])
+        start_time: float = time.perf_counter()
         try:
+            logger.debug(f"Running commands:\n{new_cmd}")
             child = subprocess.run(
                 new_cmd,
                 shell=True,
                 capture_output=True,
                 timeout=180,  # time in seconds
             )
+            duration_str = self._compute_duration_debug_str(start_time)
+            if child.returncode == 0:
+                logger.debug(f"Commands successfully finished! {duration_str}")
+            else:
+                logger.error(
+                    f"Commands failed with code: {child.returncode}! {duration_str}"
+                )
             return PolarisResponse(
                 stdout=child.stdout.decode("utf-8"),
                 stderr=child.stderr.decode("utf-8"),
                 exit_code=child.returncode,
             )
         except subprocess.TimeoutExpired:
+            duration_str = self._compute_duration_debug_str(start_time)
+            logger.exception(f"Commands timed out ({duration_str})! {new_cmd}")
             return PolarisResponse(
                 stdout="",
                 stderr=f"Timeout while running command: {new_cmd}",
                 exit_code=1,
             )
+        except Exception:
+            duration_str = self._compute_duration_debug_str(start_time)
+            logger.exception(f"Command failed ({duration_str})! {new_cmd}")
+            raise
 
     def submit_job(
         self,

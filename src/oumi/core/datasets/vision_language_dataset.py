@@ -1,51 +1,30 @@
-import copy
-import io
-from abc import ABC, abstractmethod
-from typing import Final, NamedTuple, Optional, Union
+# Copyright 2025 - Oumi
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-import numpy as np
-import requests
-import torch
-from PIL import Image
+from abc import ABC, abstractmethod
+from typing import Any, Optional
+
 from typing_extensions import override
 
-import oumi.core.constants as constants
-from oumi.builders.processors import build_processor
 from oumi.core.datasets import BaseSftDataset
+from oumi.core.feature_generators import VisionLanguageConversationFeatureGenerator
 from oumi.core.processors.base_processor import BaseProcessor
 from oumi.core.tokenizers.base_tokenizer import BaseTokenizer
-from oumi.core.types.conversation import Conversation, Message, Role, Type
-from oumi.utils.logging import logger
-
-
-class _SpecialTokens(NamedTuple):
-    """Special tokens used by VisionLanguageSftDataset."""
-
-    image_token: Optional[str]
-    image_token_id: Optional[int]
-    label_ignore_index: Optional[int]
-
-
-class InputFeatureSpec(NamedTuple):
-    feature_name: str
-    required: bool
-
-
-_INPUT_FEATURES_LIST: Final[list[InputFeatureSpec]] = [
-    InputFeatureSpec(feature_name="input_ids", required=True),
-    InputFeatureSpec(feature_name="pixel_values", required=True),
-    InputFeatureSpec(feature_name="attention_mask", required=True),
-    InputFeatureSpec(feature_name="labels", required=True),
-    # Llama 3.2 Vision
-    InputFeatureSpec(feature_name="aspect_ratio_ids", required=False),
-    InputFeatureSpec(feature_name="aspect_ratio_mask", required=False),
-    InputFeatureSpec(feature_name="cross_attention_mask", required=False),
-    # Qwen2 VL
-    InputFeatureSpec(feature_name="image_grid_thw", required=False),
-]
-_INPUT_FEATURES_DICT: Final[dict[str, InputFeatureSpec]] = {
-    spec.feature_name: spec for spec in _INPUT_FEATURES_LIST
-}
+from oumi.core.types.conversation import (
+    Conversation,
+)
+from oumi.utils.conversation_utils import remove_excessive_images_from_conversation
 
 
 class VisionLanguageSftDataset(BaseSftDataset, ABC):
@@ -60,67 +39,80 @@ class VisionLanguageSftDataset(BaseSftDataset, ABC):
         multimodal architectures.
 
     Example:
+        >>> from oumi.builders import build_processor, build_tokenizer
+        >>> from oumi.core.configs import ModelParams
+        >>> from oumi.core.types.conversation import Conversation
+        >>> from oumi.core.datasets import VisionLanguageSftDataset
         >>> class MyVisionLanguageSftDataset(VisionLanguageSftDataset):
-        ...     def transform_conversation(self, example: dict) -> Conversation:
+        ...     def transform_conversation(self, example: dict):
         ...         # Implement the abstract method
         ...         # Convert the raw example into a Conversation object
         ...         pass
-        >>>
-        >>> dataset = MyVisionLanguageSftDataset(
+        >>> tokenizer = build_tokenizer(
+        ...     ModelParams(model_name="Qwen/Qwen2-1.5B-Instruct")
+        ... )
+        >>> dataset = MyVisionLanguageSftDataset( # doctest: +SKIP
+        ...     tokenizer=tokenizer,
         ...     processor_name="openai/clip-vit-base-patch32",
         ...     dataset_name="coco_captions",
         ...     split="train"
         ... )
-        >>> sample = next(iter(dataset))
-        >>> print(sample.keys())
+        >>> sample = next(iter(dataset))  # doctest: +SKIP
+        >>> print(sample.keys()) # doctest: +SKIP
     """
 
     def __init__(
         self,
         *,
+        return_conversations: bool = False,
         tokenizer: Optional[BaseTokenizer] = None,
         processor: Optional[BaseProcessor] = None,
         processor_name: Optional[str] = None,
-        label_ignore_index: Optional[int] = constants.LABEL_IGNORE_INDEX,
+        processor_kwargs: Optional[dict[str, Any]] = None,
         limit: Optional[int] = None,
         trust_remote_code: bool = False,
+        max_images: Optional[int] = None,
         **kwargs,
     ) -> None:
-        """Initializes a new instance of the VisionLanguageDataset class."""
+        """Initializes a new instance of the VisionLanguageDataset class.
+
+        If `return_conversations` is True, the dataset will return dictionaries
+            containing just JSON-encoded `Conversation` objects:
+            {"conversation_json": conversation.to_json()}
+        Otherwise, the dataset will return dictionaries containing model inputs:
+            {"input_ids": ..., "attention_mask": ..., "pixel_values": ...}
+
+        Args:
+            tokenizer: A tokenizer for encoding text data.
+            processor: An optional processor object for generating features.
+            processor_name: The name of the processor to use for feature generation.
+            processor_kwargs: A dictionary of processor-specific parameters.
+                These parameters are passed to the processor constructor.
+                They can override model-specific parameters.
+            limit: An optional limit on the number of examples to load.
+            trust_remote_code: Whether to trust remote code execution for the processor.
+            return_conversations: Whether to return raw `Conversation` objects.
+            max_images: The maximum number of images per conversation.
+                If the limit is exceeded, the first N images are kept.
+                If None or negative, all images are kept intact.
+                If 0, all images are dropped.
+            **kwargs: Additional keyword arguments to pass to the base class.
+        """
         super().__init__(tokenizer=tokenizer, **kwargs)
 
-        if tokenizer is None:
-            raise ValueError(
-                f"Tokenizer must be provided for {self.__class__.__name__}"
+        self._max_images = max_images
+
+        self._feature_generator = (
+            None
+            if return_conversations
+            else VisionLanguageConversationFeatureGenerator(
+                tokenizer=tokenizer,
+                processor=processor,
+                processor_name=processor_name,
+                processor_kwargs=processor_kwargs,
+                trust_remote_code=trust_remote_code,
+                return_tensors=self._return_tensors,
             )
-
-        if processor is not None:
-            if processor_name:
-                logger.warning(
-                    "Both processor and processor_name are provided. "
-                    f"Ignoring processor_name: {processor_name}"
-                )
-        elif processor_name:
-            processor = build_processor(
-                processor_name, tokenizer, trust_remote_code=trust_remote_code
-            )
-
-        self._processor: Optional[BaseProcessor] = processor
-        if self._processor is not None:
-            if not callable(self._processor):
-                raise ValueError("Processor is not callable!")
-            self._image_processor = self._processor.image_processor
-        else:
-            assert self._processor is None
-            self._tokenizer = None  # Reset base class's member variable.
-            self._image_processor = None
-
-        self._special_tokens: _SpecialTokens = _SpecialTokens(
-            image_token=(self._processor.image_token if self._processor else None),
-            image_token_id=(
-                self._processor.image_token_id if self._processor else None
-            ),
-            label_ignore_index=label_ignore_index,
         )
 
         if limit is not None:
@@ -151,164 +143,16 @@ class VisionLanguageSftDataset(BaseSftDataset, ABC):
         Returns:
             dict: A dictionary of inputs for a model.
         """
-        if self._processor is None:
-            raise ValueError("Processor required for transform")
-
         conversation = self.transform_conversation(sample)
-
-        if self._processor.chat_template is None:
-            image, prompt = self._prepare_simple_model(conversation)
-
-            inputs = self._processor(
-                images=[image],
-                text=[prompt],
-                return_tensors=self._return_tensors,
-                padding=True,
-            )
-        else:
-            images, prompt = self._prepare_instruct_model(conversation)
-
-            inputs = self._processor(
-                images=images,
-                text=[prompt],
-                return_tensors=self._return_tensors,
-                padding=True,
+        if self._max_images is not None and self._max_images >= 0:
+            conversation = remove_excessive_images_from_conversation(
+                conversation, max_images=self._max_images
             )
 
-        # Clone `input_ids` as `labels`.
-        input_ids = inputs["input_ids"]
-        if isinstance(input_ids, torch.Tensor):
-            inputs["labels"] = input_ids.clone()
-        else:
-            inputs["labels"] = copy.deepcopy(inputs["input_ids"])
+        if self._feature_generator is None:
+            # This is only compatible with `use_torchdata=True`
+            # as HF loaders expect certain keys like `input_ids`.
+            conversation_json = conversation.to_json()
+            return {"conversation_json": conversation_json}
 
-        # Processors by default return a list of tensors for each key
-        # We need to squeeze the first dimension so that it works with the data-loader
-        # Images will be of shape (C, H, W) and texts will be of shape (T)
-        # However, this is going to break models that support multiple images
-        # TODO: OPE-355 add support for multiple images
-        for feature_name, feature_spec in _INPUT_FEATURES_DICT.items():
-            if (not feature_spec.required) and (feature_name not in inputs):
-                continue
-            x = inputs[feature_name]
-
-            if isinstance(x, (torch.Tensor, np.ndarray, list)):
-                inputs[feature_name] = x[0]
-            else:
-                raise ValueError(
-                    f"Unexpected type of the feature '{feature_name}': {type(x)}"
-                )
-
-        # Ignore `image_token_id`-s in the loss computation.
-        if (
-            self._special_tokens.label_ignore_index is not None
-            and self._special_tokens.image_token_id is not None
-        ):
-            labels = inputs["labels"]
-            image_token_id = int(self._special_tokens.image_token_id)
-            label_ignore_index = int(self._special_tokens.label_ignore_index)
-            if isinstance(labels, (torch.Tensor, np.ndarray)):
-                # Modify in-place
-                labels[labels == image_token_id] = label_ignore_index
-            else:
-                # Create numpy array, modify, and copy back.
-                labels = np.array(labels)
-                labels[labels == image_token_id] = label_ignore_index
-                inputs["labels"] = labels.tolist()
-
-        return inputs.data
-
-    def _prepare_simple_model(
-        self, conversation: Conversation
-    ) -> tuple[Image.Image, str]:
-        """Prepares the images and prompt for a simple model.
-
-        Simple models only use the last image and text turn in the conversation. They
-        don't use the chat template, so the prompt is just the last text turn.
-        """
-        image_turns = [turn for turn in conversation.messages if turn.is_image()]
-        text_turns = [turn for turn in conversation.messages if turn.is_text()]
-
-        if not image_turns:
-            raise ValueError("Conversation must contain at least one image turn")
-        if not text_turns:
-            raise ValueError("Conversation must contain at least one text turn")
-
-        last_image_turn = image_turns[-1]
-        last_text_turn = text_turns[-1].content or ""
-
-        prompt = last_text_turn
-        image = self._load_image(last_image_turn)
-
-        return image, prompt
-
-    def _prepare_instruct_model(
-        self, conversation: Conversation
-    ) -> tuple[list[Image.Image], str]:
-        """Prepares the images and prompt for an instruct model.
-
-        Instruct models use the chat template to generate the prompt, and can include
-        multiple images and text turns.
-        """
-        if self._processor is None:
-            raise ValueError("Processor is required for instruct model")
-
-        # Generates the prompt using the chat template
-        # including image placeholders for each image in the conversation
-        texts = []
-        for turn in conversation.messages:
-            if turn.is_text() or turn.is_image():
-                texts.append(turn)
-            else:
-                raise ValueError(f"Unsupported message type: {turn.type}")
-
-        text = self._processor.apply_chat_template(texts, add_generation_prompt=False)
-
-        # Loads the images from the conversation
-        images = [turn for turn in conversation.messages if turn.is_image()]
-        images = [self._load_image(image) for image in images]
-
-        return images, text
-
-    def _load_image(self, image: Union[str, Message]) -> Image.Image:
-        """Loads an image from a message.
-
-        Args:
-            image (Union[str, Message]): A string representing the image path or a
-                Message object.
-
-        Returns:
-            Image.Image: A PIL image.
-        """
-        if self._image_processor is None:
-            raise ValueError("Processor required for transform")
-
-        if isinstance(image, str):
-            image_type = Type.IMAGE_URL if image.startswith("http") else Type.IMAGE_PATH
-            image = Message(type=image_type, content=image, role=Role.USER)
-
-        if image.type == Type.IMAGE_PATH:
-            if image.content is None:
-                raise ValueError("Image path is None")
-            image_bin = Image.open(image.content).convert("RGB")
-
-        elif image.type == Type.IMAGE_URL:
-            if image.content is None:
-                raise ValueError("Image URL is None")
-            try:
-                response = requests.get(image.content, stream=True)
-                response.raise_for_status()
-            except requests.exceptions.RequestException as e:
-                logger.exception(f"Failed to download image: '{image.content}'")
-                raise e
-            image_bin = Image.open(io.BytesIO(response.content)).convert("RGB")
-
-        elif image.type == Type.IMAGE_BINARY:
-            if image.binary is None:
-                raise ValueError("Image binary is None")
-            image_bin = Image.open(io.BytesIO(image.binary)).convert("RGB")
-
-        else:
-            raise ValueError(f"Unsupported image type: {image.type}")
-
-        return image_bin
+        return self._feature_generator.transform_conversation(conversation, None)

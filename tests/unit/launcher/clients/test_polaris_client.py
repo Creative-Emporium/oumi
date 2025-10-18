@@ -6,7 +6,7 @@ from unittest.mock import Mock, call, patch
 import pexpect
 import pytest
 
-from oumi.core.launcher import JobStatus
+from oumi.core.launcher import JobState, JobStatus
 from oumi.launcher.clients.polaris_client import PolarisClient
 
 _CTRL_PATH: str = "-S ~/.ssh/control-%h-%p-%r"
@@ -53,7 +53,7 @@ def _get_test_data(file_name: str) -> str:
 def _run_commands_template(commands: list[str]) -> str:
     user = "user"
     ctrl_path = "-S ~/.ssh/control-%h-%p-%r"
-    ssh_cmd = f"ssh {ctrl_path} {user}@polaris.alcf.anl.gov " " << 'EOF'"
+    ssh_cmd = f"ssh {ctrl_path} {user}@polaris.alcf.anl.gov  << 'EOF'"
     eof_suffix = "EOF"
     return "\n".join([ssh_cmd, *commands, eof_suffix])
 
@@ -691,6 +691,7 @@ def test_polaris_client_get_job_success(mock_subprocess, mock_auth):
             "failed"
         ),
         done=False,
+        state=JobState.PENDING,
     )
     assert job_status == expected_status
 
@@ -798,6 +799,73 @@ def test_polaris_client_cancel_success(mock_subprocess, mock_auth):
             "failed"
         ),
         done=True,
+        state=JobState.SUCCEEDED,
+    )
+    assert job_status == expected_status
+
+
+def test_polaris_client_cancel_success_fail_status(mock_subprocess, mock_auth):
+    mock_run2 = Mock()
+    mock_run2.stdout = _get_test_data("qstat.txt").encode("utf-8")
+    mock_run2.stderr = b"foo"
+    mock_run2.returncode = 0
+    mock_subprocess.run.return_value = mock_run2
+
+    client = PolarisClient("user")
+    job_status = client.cancel("2017654", client.SupportedQueues.DEBUG)
+    mock_subprocess.run.assert_has_calls(
+        [
+            call(
+                "ssh -S ~/.ssh/control-%h-%p-%r -O check user@polaris.alcf.anl.gov",
+                shell=True,
+                capture_output=True,
+                timeout=10,
+            ),
+            call(
+                "ssh -S ~/.ssh/control-%h-%p-%r -O check user@polaris.alcf.anl.gov",
+                shell=True,
+                capture_output=True,
+                timeout=10,
+            ),
+            call(
+                _run_commands_template(["qdel 2017654"]),
+                shell=True,
+                capture_output=True,
+                timeout=180,
+            ),
+            call(
+                "ssh -S ~/.ssh/control-%h-%p-%r -O check user@polaris.alcf.anl.gov",
+                shell=True,
+                capture_output=True,
+                timeout=10,
+            ),
+            call(
+                _run_commands_template(["qstat -s -x -w -u user"]),
+                shell=True,
+                capture_output=True,
+                timeout=180,
+            ),
+        ]
+    )
+    expected_status = JobStatus(
+        id="2017654",
+        name="example_job.sh",
+        status="E",
+        cluster="debug",
+        metadata=(
+            "                                                                      "
+            "                             Req'd  Req'd   Elap\n"
+            "Job ID                         Username        Queue           Jobname"
+            "         SessID   NDS  TSK   Memory Time  S Time\n"
+            "------------------------------ --------------- --------------- "
+            "--------------- -------- ---- ----- ------ ----- - -----\n"
+            "2017654.polaris-pbs-01.hsn.cm* matthew         debug           "
+            "example_job.sh   2356268    1    64    --  00:10 E 00:00:42\n"
+            "   Job run at Wed Jul 10 at 23:33 on (x3006c0s19b1n0:ncpus=64) and "
+            "failed"
+        ),
+        done=True,
+        state=JobState.FAILED,
     )
     assert job_status == expected_status
 
@@ -1199,6 +1267,43 @@ def test_polaris_client_put_recursive_timeout(mock_subprocess_no_init, mock_auth
         )
 
 
+def test_polaris_client_put_recursive_memory_error(mock_subprocess_no_init, mock_auth):
+    with tempfile.TemporaryDirectory() as output_temp_dir:
+        mock_subprocess_no_init.TimeoutExpired = subprocess.TimeoutExpired
+        mock_success_run = Mock()
+        mock_success_run.stdout = b"out"
+        mock_success_run.stderr = b"err"
+        mock_success_run.returncode = 0
+        mock_run = Mock()
+        mock_subprocess_no_init.run.side_effect = [
+            mock_success_run,
+            mock_success_run,
+            mock_success_run,
+            mock_success_run,
+            MemoryError("OOM!"),
+        ]
+        mock_run.stdout = b"out"
+        mock_run.stderr = b"err"
+        mock_run.returncode = 1
+        with pytest.raises(MemoryError, match="OOM!"):
+            client = PolarisClient("user")
+            client.put_recursive(
+                output_temp_dir,
+                "destination",
+            )
+        mock_subprocess_no_init.run.assert_has_calls(
+            [
+                call(
+                    'rsync -e "ssh -S ~/.ssh/control-%h-%p-%r" -avz --delete '
+                    f"{output_temp_dir} user@polaris.alcf.anl.gov:destination",
+                    shell=True,
+                    capture_output=True,
+                    timeout=300,
+                ),
+            ]
+        )
+
+
 def test_polaris_client_put_success(mock_subprocess, mock_auth):
     mock_run = Mock()
     mock_subprocess.run.return_value = mock_run
@@ -1270,6 +1375,42 @@ def test_polaris_client_put_failure(mock_subprocess, mock_auth):
     )
 
 
+def test_polaris_client_put_other_exception(mock_subprocess, mock_auth):
+    mock_success_run = Mock()
+    mock_success_run.stdout = b"out"
+    mock_success_run.stderr = b"err"
+    mock_success_run.returncode = 0
+    mock_subprocess.run.side_effect = [
+        mock_success_run,
+        mock_success_run,
+        ValueError("Dummy test exception!"),
+    ]
+    with pytest.raises(ValueError, match="Dummy test exception!"):
+        client = PolarisClient("user")
+        client.put(
+            file_contents="file contents",
+            destination="destination/file.txt",
+        )
+    mock_subprocess.run.assert_has_calls(
+        [
+            call(
+                _run_commands_template(
+                    [
+                        "mkdir -p destination",
+                        "touch destination/file.txt",
+                        'cat <<"SCRIPTFILETAG" > destination/file.txt',
+                        "file contents",
+                        "SCRIPTFILETAG",
+                    ]
+                ),
+                shell=True,
+                capture_output=True,
+                timeout=180,
+            ),
+        ]
+    )
+
+
 def test_polaris_client_get_active_users(mock_subprocess):
     mock_run = Mock()
     mock_subprocess.run.return_value = mock_run
@@ -1277,6 +1418,7 @@ def test_polaris_client_get_active_users(mock_subprocess):
         b"control-polaris.alcf.anl.gov-22-matthew\n"
         b"control-polaris.alcf.anl.gov-22-user1\n"
         b"control-polaris.alcf.anl.gov-22-user2\n"
+        b"control-polaris.alcf.anl.gov-22-user-with-dash-in-name\n"
     )
     mock_run.stderr = b"foo"
     mock_run.returncode = 0
@@ -1287,7 +1429,7 @@ def test_polaris_client_get_active_users(mock_subprocess):
         shell=True,
         capture_output=True,
     )
-    assert set(active_users) == {"matthew", "user1", "user2"}
+    assert set(active_users) == {"matthew", "user1", "user2", "user-with-dash-in-name"}
 
 
 def test_polaris_client_get_active_users_empty(mock_subprocess):

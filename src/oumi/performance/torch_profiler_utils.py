@@ -1,3 +1,17 @@
+# Copyright 2025 - Oumi
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import functools
 import pathlib
 from contextlib import contextmanager
@@ -101,13 +115,6 @@ def torch_profile(
 ):
     """Creates PyTorch Profiler context manager.
 
-    Example:
-        with torch_profile(profiler_params, record_function_name="oumi.train") as prof:
-            for i in range(n):
-                training_step()
-                if prof is not None:
-                    prof.step()
-
     Args:
         params: Profiler config.
         training_output_dir: If `ProfilerParams.save_dir` is not specified, then
@@ -117,8 +124,17 @@ def torch_profile(
             for top-level `train()` operation.
 
     Yields:
-            The newly-created Profiler object if profiling is enabled,
-            or `None` otherwise.
+        torch.profiler.profile or None: The newly-created Profiler object if profiling
+            is enabled, or `None` otherwise.
+
+    Example:
+        To profile a training loop::
+
+            with torch_profile(params, record_function_name="oumi.train") as prof:
+                for i in range(n):
+                    training_step()
+                    if prof is not None:
+                        prof.step()
     """
     params = _configure_torch_profile_save_dir(params, training_output_dir)
 

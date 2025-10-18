@@ -1,12 +1,29 @@
+import re
+import tempfile
+from pathlib import Path
+
 import pytest
 
+from oumi.core.analyze.dataset_analyzer import (
+    ConversationAnalysisResult,
+    MessageAnalysisResult,
+)
+from oumi.core.configs import EvaluationBackend, EvaluationConfig, EvaluationTaskParams
+from oumi.core.evaluation.evaluation_result import EvaluationResult
 from oumi.core.registry import (
     REGISTRY,
     Registry,
     RegistryType,
     register,
     register_dataset,
+    register_evaluation_function,
+    register_sample_analyzer,
 )
+
+
+@pytest.fixture(autouse=True)
+def mock_env_vars(monkeypatch):
+    monkeypatch.setenv("OUMI_EXTRA_DEPS_FILE", "")
 
 
 @pytest.fixture(autouse=True)
@@ -17,9 +34,11 @@ def cleanup():
             snapshot.register(key, reg_type, value)
     # Clear the registry before each test.
     REGISTRY.clear()
+    REGISTRY._initialized = False
     yield
     # Clear the registry after each test.
     REGISTRY.clear()
+    REGISTRY._initialized = False
     # Restore the registry after each test.
     for reg_type in RegistryType:
         for key, value in snapshot.get_all(reg_type).items():
@@ -153,20 +172,53 @@ def test_registry_failure_model_not_present_in_registry():
     assert REGISTRY.get_model_config(name="oumi/dummy2") is None
 
 
-def test_registry_metrics_function():
-    @register("dummy_fn", RegistryType.METRICS_FUNCTION)
+@pytest.mark.parametrize(
+    "registry_type", [RegistryType.METRICS_FUNCTION, RegistryType.REWARD_FUNCTION]
+)
+def test_registry_function(registry_type: RegistryType):
+    @register("dummy_fn", registry_type)
     def dummy_function():
         pass
 
-    @register("number2", RegistryType.METRICS_FUNCTION)
+    @register("number2", registry_type)
     def dummy_function2():
         pass
 
-    assert REGISTRY.contains("dummy_fn", RegistryType.METRICS_FUNCTION)
-    assert REGISTRY.get("dummy_fn", RegistryType.METRICS_FUNCTION) == dummy_function
+    assert REGISTRY.contains("dummy_fn", registry_type)
+    assert REGISTRY.get("dummy_fn", registry_type) == dummy_function
 
-    assert REGISTRY.contains("number2", RegistryType.METRICS_FUNCTION)
-    assert REGISTRY.get("number2", RegistryType.METRICS_FUNCTION) == dummy_function2
+    assert REGISTRY.contains("number2", registry_type)
+    assert REGISTRY.get("number2", registry_type) == dummy_function2
+
+
+@pytest.mark.parametrize(
+    "registry_type", [RegistryType.METRICS_FUNCTION, RegistryType.REWARD_FUNCTION]
+)
+def test_registry_metrics_function_non_callable(registry_type: RegistryType):
+    class FooNonCallable:
+        pass
+
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            f"Registry: `foo_non_callable` of `{registry_type}` must be callable"
+        ),
+    ):
+        REGISTRY.register("foo_non_callable", registry_type, FooNonCallable())
+
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            f"Registry: `integer_func` of `{registry_type}` must be callable"
+        ),
+    ):
+        REGISTRY.register("integer_func", registry_type, 99)
+
+    with pytest.raises(
+        ValueError,
+        match=re.escape(f"Registry: `none_func` of `{registry_type}` must be callable"),
+    ):
+        REGISTRY.register("none_func", registry_type, None)
 
 
 def test_registry_failure_metrics_function_not_present():
@@ -284,3 +336,328 @@ def test_registry_case_insensitive_get_all():
     all_builders = REGISTRY.get_all(RegistryType.CLOUD)
     assert set(all_builders.keys()) == {"class_one", "class_two"}
     assert list(all_builders.values()) == [builder_one, builder_two]
+
+
+def test_registry_contains_initialization():
+    assert REGISTRY._initialized is False
+    assert len(REGISTRY._registry) == 0
+    _ = REGISTRY.contains("foo", RegistryType.CLOUD)
+    assert REGISTRY._initialized
+
+
+def test_registry_register_initialization():
+    assert REGISTRY._initialized is False
+    assert len(REGISTRY._registry) == 0
+    _ = REGISTRY.register("foo", RegistryType.CLOUD, "bar")
+    assert REGISTRY._initialized
+
+
+def test_registry_get_initialization():
+    assert REGISTRY._initialized is False
+    assert len(REGISTRY._registry) == 0
+    _ = REGISTRY.get("foo", RegistryType.CLOUD)
+    assert REGISTRY._initialized
+
+
+def test_registry_get_all_initialization():
+    assert REGISTRY._initialized is False
+    assert len(REGISTRY._registry) == 0
+    _ = REGISTRY.get_all(RegistryType.CLOUD)
+    assert REGISTRY._initialized
+
+
+def test_registry_user_classes(monkeypatch):
+    with tempfile.TemporaryDirectory() as output_temp_dir:
+        req_file = Path(output_temp_dir) / "requirements.txt"
+        file_1 = Path(output_temp_dir) / "file_1.py"
+        file_2 = Path(output_temp_dir) / "another_file.py"
+        file_3 = Path(output_temp_dir) / "last_one.py"
+        with monkeypatch.context() as mp:
+            mp.setenv("OUMI_EXTRA_DEPS_FILE", str(req_file))
+            with open(req_file, "w") as f:
+                f.write(str(file_1) + "\n\n")  # Add an empty line
+                f.write(str(file_2) + "\n")
+                f.write(str(file_3) + "\n")
+            with open(file_1, "w") as f:
+                f.writelines(
+                    [
+                        "from oumi.core.registry import register, RegistryType\n",
+                        "@register('file_1', RegistryType.CLOUD)\n",
+                        "class FileOne:\n",
+                        "    pass\n",
+                    ]
+                )
+            with open(file_2, "w") as f:
+                f.writelines(
+                    [
+                        "from oumi.core.registry import register, RegistryType\n",
+                        "@register('file_2', RegistryType.MODEL)\n",
+                        "class FileTwo:\n",
+                        "    pass\n",
+                    ]
+                )
+            with open(file_3, "w") as f:
+                f.writelines(
+                    [
+                        "from oumi.core.registry import register, RegistryType\n",
+                        "@register('file_3', RegistryType.METRICS_FUNCTION)\n",
+                        "class FileThree:\n",
+                        "    pass\n",
+                    ]
+                )
+            assert not REGISTRY._initialized
+            assert REGISTRY.contains("file_1", RegistryType.CLOUD)
+            assert REGISTRY.contains("file_2", RegistryType.MODEL)
+            assert REGISTRY.contains("file_3", RegistryType.METRICS_FUNCTION)
+            assert REGISTRY._initialized
+
+
+def test_registry_user_classes_empty_requirements(monkeypatch):
+    with tempfile.TemporaryDirectory() as output_temp_dir:
+        req_file = Path(output_temp_dir) / "requirements.txt"
+        with monkeypatch.context() as mp:
+            mp.setenv("OUMI_EXTRA_DEPS_FILE", str(req_file))
+            with open(req_file, "w") as f:
+                f.write("\n")
+            assert not REGISTRY._initialized
+            assert not REGISTRY.contains("file_1", RegistryType.CLOUD)
+            assert REGISTRY._initialized
+
+
+def test_registry_user_classes_malformed_dep(monkeypatch):
+    with tempfile.TemporaryDirectory() as output_temp_dir:
+        req_file = Path(output_temp_dir) / "requirements.txt"
+        file_1 = Path(output_temp_dir) / "file_1.py"
+        with monkeypatch.context() as mp:
+            mp.setenv("OUMI_EXTRA_DEPS_FILE", str(req_file))
+            with open(req_file, "w") as f:
+                f.write(str(file_1) + "\n\n")  # Add an empty line
+                f.write(str(Path(output_temp_dir) / "non_existent_file.py") + "\n")
+            with open(file_1, "w") as f:
+                f.writelines(
+                    [
+                        "fr om thisisbadpython import fakemodulethatfails\n",
+                        "@register('file_1', RegistryType.CLOUD)\n",
+                        "class FileOne:\n",
+                        "    pass\n",
+                    ]
+                )
+            assert not REGISTRY._initialized
+            with pytest.raises(
+                ImportError, match="Failed to load user-defined module:"
+            ):
+                REGISTRY.contains("file_1", RegistryType.CLOUD)
+
+
+def test_registry_user_classes_missing_dep(monkeypatch):
+    with tempfile.TemporaryDirectory() as output_temp_dir:
+        req_file = Path(output_temp_dir) / "requirements.txt"
+        file_1 = Path(output_temp_dir) / "file_1.py"
+        with monkeypatch.context() as mp:
+            mp.setenv("OUMI_EXTRA_DEPS_FILE", str(req_file))
+            with open(req_file, "w") as f:
+                f.write(str(file_1) + "\n\n")  # Add an empty line
+                f.write(str(Path(output_temp_dir) / "non_existent_file.py") + "\n")
+            with open(file_1, "w") as f:
+                f.writelines(
+                    [
+                        "from oumi.core.registry import register, RegistryType\n",
+                        "@register('file_1', RegistryType.CLOUD)\n",
+                        "class FileOne:\n",
+                        "    pass\n",
+                    ]
+                )
+            assert not REGISTRY._initialized
+            with pytest.raises(
+                ImportError, match="Failed to load user-defined module:"
+            ):
+                REGISTRY.contains("file_1", RegistryType.CLOUD)
+
+
+# Tests for registering evaluation functions.
+def test_register_evaluation_fn_with_annotations_happy_path():
+    @register_evaluation_function("test_evaluation_fn")
+    def oumi_test_evaluation_fn(
+        task_params: EvaluationTaskParams,
+        config: EvaluationConfig,
+        optional_param: str,
+    ) -> EvaluationResult:
+        """Dummy evaluation function for unit testing."""
+        assert task_params.evaluation_backend == EvaluationBackend.CUSTOM.value
+        assert task_params.task_name == "test_evaluation_fn"
+        assert config.run_name == "run_name_for_test_evaluation_fn"
+        assert optional_param == "optional_param_value"
+
+        return EvaluationResult(
+            task_name=task_params.task_name,
+            task_result={"result": "dummy_result"},
+            backend_config={"config": "dummy_config"},
+        )
+
+    evaluation_fn = REGISTRY.get_evaluation_function("test_evaluation_fn")
+    assert evaluation_fn
+    evaluation_result = evaluation_fn(
+        task_params=EvaluationTaskParams(
+            task_name="test_evaluation_fn",
+            evaluation_backend=EvaluationBackend.CUSTOM.value,
+        ),
+        config=EvaluationConfig(run_name="run_name_for_test_evaluation_fn"),
+        optional_param="optional_param_value",
+    )
+    assert evaluation_result.task_name == "test_evaluation_fn"
+    assert evaluation_result.task_result == {"result": "dummy_result"}
+    assert evaluation_result.backend_config == {"config": "dummy_config"}
+
+
+def test_register_evaluation_fn_without_annotations_happy_path():
+    @register_evaluation_function("test_evaluation_fn")
+    def oumi_test_evaluation_fn(task_params, config, optional_param):
+        """Dummy evaluation function for unit testing."""
+        assert task_params.evaluation_backend == EvaluationBackend.CUSTOM.value
+        assert task_params.task_name == "test_evaluation_fn"
+        assert config.run_name == "run_name_for_test_evaluation_fn"
+        assert optional_param == "optional_param_value"
+
+        return EvaluationResult(
+            task_name=task_params.task_name,
+            task_result={"result": "dummy_result"},
+            backend_config={"config": "dummy_config"},
+        )
+
+    evaluation_fn = REGISTRY.get_evaluation_function("test_evaluation_fn")
+    assert evaluation_fn
+    evaluation_result = evaluation_fn(
+        task_params=EvaluationTaskParams(
+            task_name="test_evaluation_fn",
+            evaluation_backend=EvaluationBackend.CUSTOM.value,
+        ),
+        config=EvaluationConfig(run_name="run_name_for_test_evaluation_fn"),
+        optional_param="optional_param_value",
+    )
+    assert evaluation_result.task_name == "test_evaluation_fn"
+    assert evaluation_result.task_result == {"result": "dummy_result"}
+    assert evaluation_result.backend_config == {"config": "dummy_config"}
+
+
+def test_register_evaluation_fn_without_inputs_happy_path():
+    @register_evaluation_function("test_evaluation_fn")
+    def oumi_test_evaluation_fn():
+        """Dummy evaluation function for unit testing."""
+        return EvaluationResult(
+            task_name="unknown_task",
+            task_result={"result": "dummy_result"},
+            backend_config={"config": "dummy_config"},
+        )
+
+    evaluation_fn = REGISTRY.get_evaluation_function("test_evaluation_fn")
+    assert evaluation_fn
+    evaluation_result = evaluation_fn()
+    assert evaluation_result.task_name == "unknown_task"
+    assert evaluation_result.task_result == {"result": "dummy_result"}
+    assert evaluation_result.backend_config == {"config": "dummy_config"}
+
+
+# Tests for registering sample analyzers.
+def test_registry_sample_analyzer():
+    @register_sample_analyzer("dummy_analyzer")
+    class DummyAnalyzer:
+        def analyze_sample(
+            self, conversation, tokenizer=None
+        ) -> tuple[list[MessageAnalysisResult], ConversationAnalysisResult]:
+            return (
+                [
+                    MessageAnalysisResult(
+                        message_index=0,
+                        role="user",
+                        message_id="dummy_msg",
+                        text_content="dummy_message",
+                        analyzer_metrics={},
+                    )
+                ],
+                ConversationAnalysisResult(analyzer_metrics={}),
+            )
+
+    assert REGISTRY.contains("dummy_analyzer", RegistryType.SAMPLE_ANALYZER)
+    assert REGISTRY.get("dummy_analyzer", RegistryType.SAMPLE_ANALYZER) == DummyAnalyzer
+    assert not REGISTRY.contains("some_other_analyzer", RegistryType.SAMPLE_ANALYZER)
+
+
+def test_registry_sample_analyzer_get_all():
+    @register_sample_analyzer("analyzer_one")
+    class AnalyzerOne:
+        def analyze_sample(
+            self, conversation, tokenizer=None
+        ) -> tuple[list[MessageAnalysisResult], ConversationAnalysisResult]:
+            return (
+                [
+                    MessageAnalysisResult(
+                        message_index=0,
+                        role="user",
+                        message_id="dummy_msg",
+                        text_content="dummy_message",
+                        analyzer_metrics={},
+                    )
+                ],
+                ConversationAnalysisResult(analyzer_metrics={}),
+            )
+
+    @register_sample_analyzer("analyzer_two")
+    class AnalyzerTwo:
+        def analyze_sample(
+            self, conversation, tokenizer=None
+        ) -> tuple[list[MessageAnalysisResult], ConversationAnalysisResult]:
+            return (
+                [
+                    MessageAnalysisResult(
+                        message_index=0,
+                        role="user",
+                        message_id="dummy_msg",
+                        text_content="dummy_message",
+                        analyzer_metrics={},
+                    )
+                ],
+                ConversationAnalysisResult(analyzer_metrics={}),
+            )
+
+    all_analyzers = REGISTRY.get_all(RegistryType.SAMPLE_ANALYZER).values()
+    assert list(all_analyzers) == [AnalyzerOne, AnalyzerTwo]
+
+
+def test_registry_sample_analyzer_failure_register_twice():
+    @register_sample_analyzer("duplicate_analyzer")
+    class DummyAnalyzer:
+        def analyze_sample(
+            self, conversation, tokenizer=None
+        ) -> tuple[list[MessageAnalysisResult], ConversationAnalysisResult]:
+            return (
+                [
+                    MessageAnalysisResult(
+                        message_index=0,
+                        role="user",
+                        message_id="dummy_msg",
+                        text_content="dummy_message",
+                        analyzer_metrics={},
+                    )
+                ],
+                ConversationAnalysisResult(analyzer_metrics={}),
+            )
+
+    with pytest.raises(ValueError):
+
+        @register_sample_analyzer("duplicate_analyzer")
+        class AnotherDummyAnalyzer:
+            def analyze_sample(
+                self, conversation, tokenizer=None
+            ) -> tuple[list[MessageAnalysisResult], ConversationAnalysisResult]:
+                return (
+                    [
+                        MessageAnalysisResult(
+                            message_index=0,
+                            role="user",
+                            message_id="dummy_msg",
+                            text_content="dummy_message",
+                            analyzer_metrics={},
+                        )
+                    ],
+                    ConversationAnalysisResult(analyzer_metrics={}),
+                )
