@@ -12,8 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib.metadata
+import importlib.util
 import logging
 import os
+import platform
+import sys
+import urllib.parse
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Optional
@@ -22,14 +27,29 @@ import requests
 import typer
 import yaml
 from requests.exceptions import RequestException
+from rich.console import Console
 
-from oumi.utils.logging import logger
+from oumi.utils.logging import logger, update_logger_level
 
 CONTEXT_ALLOW_EXTRA_ARGS = {"allow_extra_args": True, "ignore_unknown_options": True}
 CONFIG_FLAGS = ["--config", "-c"]
 OUMI_FETCH_DIR = "~/.oumi/fetch"
 OUMI_GITHUB_RAW = "https://raw.githubusercontent.com/oumi-ai/oumi/main"
 _OUMI_PREFIX = "oumi://"
+
+CONSOLE = Console()
+
+
+def section_header(title, console: Console = CONSOLE):
+    """Print a section header with the given title.
+
+    Args:
+        title: The title text to display in the header.
+        console: The Console object to use for printing.
+    """
+    console.print(f"\n[blue]{'━' * console.width}[/blue]")
+    console.print(f"[yellow]   {title}[/yellow]")
+    console.print(f"[blue]{'━' * console.width}[/blue]\n")
 
 
 def parse_extra_cli_args(ctx: typer.Context) -> list[str]:
@@ -128,8 +148,8 @@ def set_log_level(level: Optional[LogLevel]):
     if not level:
         return
     uppercase_level = level.upper()
-    logger.setLevel(uppercase_level)
-    print(f"Set log level to {uppercase_level}")
+    update_logger_level("oumi", level=uppercase_level)
+    CONSOLE.print(f"Set log level to [yellow]{uppercase_level}[/yellow]")
 
 
 LOG_LEVEL_TYPE = Annotated[
@@ -142,6 +162,16 @@ LOG_LEVEL_TYPE = Annotated[
         show_choices=True,
         case_sensitive=False,
         callback=set_log_level,
+    ),
+]
+
+VERBOSE_TYPE = Annotated[
+    bool,
+    typer.Option(
+        "--verbose",
+        "-v",
+        help="Enable verbose logging with additional debug information.",
+        show_default=True,
     ),
 ]
 
@@ -220,3 +250,79 @@ def resolve_and_fetch_config(
         raise
 
     return Path(local_path)
+
+
+def create_github_issue_url(exception: Exception, traceback_str: str) -> str:
+    """Create a prefilled GitHub issue URL aligned with the bug report template.
+
+    Args:
+        exception: The exception that occurred
+        traceback_str: The full traceback string
+
+    Returns:
+        str: URL for creating a prefilled GitHub issue
+    """
+    # 2000 is the max length of a URL to ensure it works with any browser
+    MAX_URL_LENGTH = 2000
+    base_url = "https://github.com/oumi-ai/oumi/issues/new?"
+
+    python_version = (
+        f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    )
+    system_info = f"{platform.system()} {platform.release()}"
+    oumi_version = importlib.metadata.version("oumi")
+    system_info_content = (
+        f"**Please paste the output of `oumi env` here.** "
+        f"If you can't run this command, here's basic system info:\n\n"
+        f"- Operating system: {system_info}\n"
+        f"- Python version: {python_version}\n"
+        f"- Oumi version: {oumi_version}"
+    )
+
+    title_template = "[Automatic Error Report]: {error_msg}"
+    reproduction_template = (
+        "Steps to reproduce:\n\n"
+        "Command executed: `{command}`\n\n"
+        "Stack trace:\n```\n{traceback}\n```"
+    )
+
+    exception_str = str(exception)
+    command_str = " ".join(sys.argv)
+
+    # Limit the title to 50 chars (unencoded)
+    title_error = exception_str[:50]
+
+    command_part = command_str
+    error_part = exception_str
+    stack_part = traceback_str or ""
+
+    def build_url(command_part: str, error_part: str, stack_part: str) -> str:
+        params = {
+            "template": "bug-report.yaml",
+            "title": title_template.format(error_msg=title_error),
+            "what-happened": error_part,
+            "reproduction-steps": reproduction_template.format(
+                command=command_part, traceback=stack_part
+            ),
+            "system-info": system_info_content,
+        }
+        return f"{base_url}{urllib.parse.urlencode(params)}"
+
+    full_url = build_url(command_part, error_part, stack_part)
+
+    # If too long, iteratively shrink fields by encoded length
+    while len(full_url) > MAX_URL_LENGTH:
+        if stack_part:
+            # shrink stack from the front (keep tail)
+            cut = max(1, len(stack_part) // 2)
+            stack_part = stack_part[cut:]
+        elif error_part:
+            cut = max(1, len(error_part) // 2)
+            error_part = error_part[:-cut]
+        elif command_part:
+            cut = max(1, len(command_part) // 2)
+            command_part = command_part[:-cut]
+        else:
+            return f"{base_url}template=bug-report.yaml"
+        full_url = build_url(command_part, error_part, stack_part)
+    return full_url

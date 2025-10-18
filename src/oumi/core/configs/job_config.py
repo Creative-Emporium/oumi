@@ -16,8 +16,15 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from omegaconf import MISSING
+from typing_extensions import override
 
 from oumi.core.configs.base_config import BaseConfig
+from oumi.utils.logging import logger
+from oumi.utils.str_utils import (
+    get_editable_install_override_env_var,
+    set_oumi_install_editable,
+)
+from oumi.utils.version_utils import is_dev_build
 
 
 @dataclass
@@ -46,13 +53,18 @@ class JobResources:
     """The cloud used to run the job (required).
 
     Options:
+        Major cloud providers:
         - aws: Amazon Web Services
         - azure: Microsoft Azure
         - gcp: Google Cloud Platform
         - lambda: Lambda Cloud
-        - local: The local machine launching the job
-        - polaris: The Polaris cluster at Argonne National Laboratory
         - runpod: RunPod
+        Research clusters (not intended for general use):
+        - polaris: The Polaris cluster at Argonne National Laboratory
+        - frontier: The Frontier cluster at Oak Ridge National Laboratory
+        - perlmutter: The Perlmutter cluster at Lawrence Berkeley National Laboratory
+        Other clouds:
+        - local: The local machine launching the job
     """
 
     region: Optional[str] = None
@@ -108,6 +120,13 @@ class JobResources:
     disk tiers.
     """
 
+    image_id: Optional[str] = None
+    """The image id used to boot the instances (optional).
+
+    You can specify a docker by using the format `docker:<image_id>`.
+    This field is not applicable for all clouds.
+    """
+
 
 @dataclass
 class JobConfig(BaseConfig):
@@ -119,7 +138,7 @@ class JobConfig(BaseConfig):
     user: Optional[str] = None
     """The user that the job will run as (optional). Required only for Polaris."""
 
-    working_dir: str = MISSING
+    working_dir: Optional[str] = None
     """The local directory containing the scripts required to execute this job.
 
     This directory will be copied to the remote node before the job is executed.
@@ -161,3 +180,27 @@ class JobConfig(BaseConfig):
 
     run: str = MISSING
     """The script to run on every node. Required. Runs after `setup`."""
+
+    @override
+    def __finalize_and_validate__(self):
+        """Finalizes and validates the configuration."""
+        # (experimental) If the OUMI_FORCE_EDITABLE_INSTALL env var is set to a truthy
+        # value, and we're running a dev build of oumi, attempt to modify the setup/run
+        # scripts in the job config to install Oumi in editable mode from source, as
+        # opposed to installing from PyPI.
+        # This is intended for developers who are modifying Oumi source code and need to
+        # test their changes in a remote job; by default, all of our job configs install
+        # Oumi from PyPI.
+        if get_editable_install_override_env_var() and is_dev_build():
+            logger.info("-" * 80)
+            logger.info(
+                "OUMI_FORCE_EDITABLE_INSTALL detected! Attempting to modify job "
+                "config to install Oumi in editable mode from source..."
+            )
+            if self.setup:
+                logger.info("Modifying setup script...")
+                self.setup = set_oumi_install_editable(self.setup)
+            if self.run:
+                logger.info("Modifying run script...")
+                self.run = set_oumi_install_editable(self.run)
+            logger.info("-" * 80)

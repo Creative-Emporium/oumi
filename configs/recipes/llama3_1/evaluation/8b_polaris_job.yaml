@@ -4,7 +4,7 @@
 #   - Set up your ALCF account (only available to Oumi core team)
 #   - Set `user` to your ALCF username
 #   - Log into WandB (`wandb login`) or disable `enable_wandb`
-#   - Log into HF: `huggingface-cli login`
+#   - Log into HF: `hf auth login`
 #   - Request access to Llama 3.1: https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct
 #
 # Usage:
@@ -52,8 +52,7 @@ run: |
 
   echo "Starting evaluation for ${MODEL_CHECKPOINT_DIR} ..."
   set -x
-  oumi distributed accelerate launch \
-    -m oumi evaluate \
+  oumi evaluate \
     -c configs/recipes/llama3_1/evaluation/8b_eval.yaml \
     --run_name "polaris.llama8b.eval.${OUMI_JOBNUM}" \
     --model.model_name "${MODEL_CHECKPOINT_DIR}"

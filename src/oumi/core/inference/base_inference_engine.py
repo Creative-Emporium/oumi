@@ -13,11 +13,17 @@
 # limitations under the License.
 
 import copy
+import dataclasses
+import hashlib
+import json
+import time
+import uuid
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional
 
 import jsonlines
+from hdrh.histogram import HdrHistogram
 from tqdm import tqdm
 
 from oumi.core.configs import (
@@ -27,6 +33,7 @@ from oumi.core.configs import (
 )
 from oumi.core.types.conversation import Conversation
 from oumi.utils.logging import logger
+from oumi.utils.math_utils import is_power_of_two
 
 
 class BaseInferenceEngine(ABC):
@@ -57,6 +64,10 @@ class BaseInferenceEngine(ABC):
             generation_params = GenerationParams()
         self._generation_params = generation_params
 
+        self._latency_histogram_online = HdrHistogram(1, 60 * 1000, 1)
+        self._latency_histogram_from_file = HdrHistogram(20, 180 * 1000, 1)
+        self._dataset_hash = None
+
     def infer(
         self,
         input: Optional[list[Conversation]] = None,
@@ -79,20 +90,158 @@ class BaseInferenceEngine(ABC):
                 "Only one of input or inference_config.input_path should be provided."
             )
 
-        if inference_config and inference_config.generation:
-            generation_params = inference_config.generation
-            self._check_unsupported_params(generation_params)
-        else:
-            generation_params = self._generation_params
+        # Ensure the inference config has up-to-date generation parameters.
+        if inference_config:
+            if inference_config.generation:
+                self._check_unsupported_params(inference_config.generation)
+            elif self._generation_params:
+                inference_config = copy.deepcopy(inference_config)
+                inference_config.generation = self._generation_params
 
+                # Warn the user: They provided an inference config without generation
+                # params, so what was the point of providing it in the first place?
+                logger.warning(
+                    "No generation parameters provided in the inference config. Using "
+                    "the generation parameters that the engine was initialized with."
+                )
+
+        output_path = inference_config.output_path if inference_config else None
+
+        # Load input conversations either from file or use provided input
+        conversations_to_process: list[Conversation] = []
         if input is not None:
-            return self.infer_online(input, inference_config)
+            conversations_to_process = input
         elif inference_config and inference_config.input_path is not None:
-            return self.infer_from_file(inference_config.input_path, inference_config)
+            conversations_to_process = self._read_conversations(
+                inference_config.input_path,
+            )
         else:
             raise ValueError(
                 "One of input or inference_config.input_path must be provided."
             )
+
+        unique_conversation_ids = set()
+        for i, conversation in enumerate(conversations_to_process):
+            if conversation.conversation_id is not None:
+                if conversation.conversation_id in unique_conversation_ids:
+                    raise ValueError(
+                        f"Conversation ID {conversation.conversation_id} is not unique."
+                    )
+                unique_conversation_ids.add(conversation.conversation_id)
+                continue
+
+            # Generate a deterministic conversation ID based on index if none exists
+            messages = conversation.messages
+            all_str_message_content = ",".join(
+                [
+                    message.content
+                    for message in messages
+                    if isinstance(message.content, str)
+                ]
+            )
+            content_hash = hashlib.sha256(all_str_message_content.encode()).hexdigest()
+            id_name = str(i) + "_" + content_hash
+
+            conversation.conversation_id = str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_DNS,
+                    id_name,
+                )
+            )
+            unique_conversation_ids.add(conversation.conversation_id)
+
+        # Calculate the hash of the dataset to use for referencing the inference
+        # filename between runs, given the same model and generation parameters.
+        dataset_hash = ""
+        if len(conversations_to_process) > 0:
+            row_hashes = [
+                hashlib.sha256(c.to_json().encode()).hexdigest()
+                for c in conversations_to_process
+            ]
+            dataset_hash = hashlib.sha256(",".join(row_hashes).encode()).hexdigest()
+        self._dataset_hash = dataset_hash
+
+        completed_conversations = self._load_from_scratch(output_path)
+
+        # Filter out already completed conversations
+        remaining_conversations = self._filter_incomplete_conversations(
+            conversations_to_process, completed_conversations
+        )
+
+        if len(remaining_conversations) < len(conversations_to_process):
+            logger.info(
+                f"Found {len(completed_conversations)} completed conversations. "
+                f"Processing remaining {len(remaining_conversations)} conversations."
+            )
+
+        # Run inference only on remaining conversations
+        start_time = time.perf_counter()
+        histogram = self._latency_histogram_online
+        inference_results = self._infer_online(
+            remaining_conversations, inference_config
+        )
+        histogram.record_value((time.perf_counter() - start_time) * 1e3)
+        self._maybe_log_latency_histogram(histogram)
+
+        if len(inference_results) == len(conversations_to_process):
+            final_results = inference_results
+        else:
+            # Incomplete inference results were saved to scratch file.
+            # Load all results from scratch to get all results.
+            final_results = self._load_from_scratch(output_path)
+            if len(final_results) != len(conversations_to_process):
+                scratch_filepath = self._get_scratch_filepath(output_path)
+                raise ValueError(
+                    f"Number of final results ({len(final_results)}) does not match "
+                    f"number of conversations to process "
+                    f"({len(conversations_to_process)}). "
+                    f"This typically occurs when the inference configuration has been "
+                    f"changed after partial processing. Cached results are stored at: "
+                    f"{scratch_filepath}. With the updated caching logic, this should "
+                    f"automatically resolve in future runs."
+                )
+
+        self._cleanup_scratch_file(output_path)
+
+        sorted_conversations = {
+            conv.conversation_id: conv for conv in conversations_to_process
+        }
+
+        for conv in final_results:
+            sorted_conversations[conv.conversation_id] = conv
+
+        final_results = list(sorted_conversations.values())
+
+        if inference_config and inference_config.output_path:
+            self._save_conversations(final_results, inference_config.output_path)
+
+        return final_results
+
+    def _maybe_log_latency_histogram(self, histogram: Optional[HdrHistogram]) -> None:
+        """Logs the histogram if it is not None.
+
+        Args:
+            histogram: The histogram to log.
+        """
+        if histogram is None:
+            return
+        total_count = histogram.get_total_count()
+        # TODO: Define a better way to enable/configure this logging.
+        if not (
+            isinstance(total_count, int)
+            and total_count >= 2
+            and is_power_of_two(total_count)
+        ):
+            return
+
+        p50 = histogram.get_value_at_percentile(50)
+        p90 = histogram.get_value_at_percentile(90)
+        p99 = histogram.get_value_at_percentile(99)
+        logger.debug(
+            f"{self.__class__.__name__}: "
+            f"Latency Histogram: {total_count} samples recorded:"
+            f"\tp50: {p50:.1f}ms\tp90: {p90:.1f}ms\tp99: {p99:.1f}ms"
+        )
 
     def _read_conversations(self, input_filepath: str) -> list[Conversation]:
         """Reads conversations from a file in Oumi chat format.
@@ -112,11 +261,63 @@ class BaseInferenceEngine(ABC):
                     conversations.append(conversation)
         return conversations
 
-    def _get_scratch_filepath(self, output_filepath: str) -> str:
+    def _load_from_scratch(self, output_filepath: Optional[str]) -> list[Conversation]:
+        """Loads conversations from a scratch file.
+
+        Args:
+            output_filepath: The path to the output file. This is used to determine the
+                location of the scratch file.
+
+        Returns:
+            list[Conversation]: A list of conversations loaded from the scratch file,
+                or an empty list if the scratch file does not exist or is empty.
+        """
+        scratch_filepath = self._get_scratch_filepath(output_filepath)
+        if not Path(scratch_filepath).exists():
+            return []
+
+        conversations = []
+        with jsonlines.open(scratch_filepath, mode="r") as reader:
+            for line in reader:
+                conversations.append(Conversation.from_dict(line))
+        return conversations
+
+    def _filter_incomplete_conversations(
+        self,
+        input_conversations: list[Conversation],
+        completed_conversations: list[Conversation],
+    ) -> list[Conversation]:
+        """Filters out conversations that have already been completed.
+
+        Args:
+            input_conversations: List of conversations to run inference on
+            completed_conversations: List of conversations already completed
+
+        Returns:
+            list[Conversation]: List of conversations that still need inference results
+        """
+        completed_ids = {
+            conv.conversation_id
+            for conv in completed_conversations
+            if conv.conversation_id is not None
+        }
+        return [
+            conv
+            for conv in input_conversations
+            if conv.conversation_id not in completed_ids
+        ]
+
+    def _get_scratch_filepath(self, output_filepath: Optional[str]) -> str:
         """Returns a scratch filepath for the given output filepath.
 
+        The scratch filepath always includes a hash of the model parameters, generation
+        parameters, and dataset to ensure cache consistency when configurations change.
+
         For example, if the output filepath is "/foo/bar/output.json", the scratch
-        filepath will be "/foo/bar/scratch/output.json"
+        filepath will be "/foo/bar/scratch/output_<hash>.json"
+
+        If no output filepath is provided, a temporary file is used and placed in
+        "~/.cache/oumi/tmp/temp_inference_output_<hash>.jsonl".
 
         Args:
             output_filepath: The output filepath.
@@ -124,11 +325,28 @@ class BaseInferenceEngine(ABC):
         Returns:
             str: The scratch filepath.
         """
-        original_filepath = Path(output_filepath)
-        return str(original_filepath.parent / "scratch" / original_filepath.name)
+        # Always compute the inference hash to ensure cache consistency
+        model_params = self._model_params
+        model_params_str = json.dumps(dataclasses.asdict(model_params))
+        generation_params = self._generation_params
+        generation_params_str = json.dumps(dataclasses.asdict(generation_params))
+        inference_hash = hashlib.sha256(
+            f"{model_params_str}_{generation_params_str}_{self._dataset_hash}".encode()
+        ).hexdigest()
 
-    def _save_conversation(
-        self, conversation: Conversation, output_filepath: str
+        if output_filepath is not None:
+            original_filepath = Path(output_filepath)
+            # Include hash in filename to ensure cache consistency
+            stem = original_filepath.stem
+            suffix = original_filepath.suffix
+            hashed_filename = f"{stem}_{inference_hash}{suffix}"
+            return str(original_filepath.parent / "scratch" / hashed_filename)
+
+        path_prefix = Path.home() / ".cache" / "oumi" / "tmp"
+        return str(path_prefix / f"temp_inference_output_{inference_hash}.jsonl")
+
+    def _save_conversation_to_scratch(
+        self, conversation: Conversation, output_filepath: Optional[str]
     ) -> None:
         """Appends a conversation to a file in Oumi chat format.
 
@@ -138,10 +356,22 @@ class BaseInferenceEngine(ABC):
                 saved.
         """
         # Make the directory if it doesn't exist.
-        Path(output_filepath).parent.mkdir(parents=True, exist_ok=True)
-        with jsonlines.open(output_filepath, mode="a") as writer:
+        scratch_filepath = self._get_scratch_filepath(output_filepath)
+        Path(scratch_filepath).parent.mkdir(parents=True, exist_ok=True)
+        with jsonlines.open(scratch_filepath, mode="a") as writer:
             json_obj = conversation.to_dict()
             writer.write(json_obj)
+
+    def _cleanup_scratch_file(self, output_filepath: Optional[str]) -> None:
+        """Delete the scratch file from the file system if it exists.
+
+        Args:
+            output_filepath: The path to the output file. This is used to determine the
+                location of the scratch file.
+        """
+        scratch_filepath = self._get_scratch_filepath(output_filepath)
+        if Path(scratch_filepath).exists():
+            Path(scratch_filepath).unlink()
 
     def _save_conversations(
         self, conversations: list[Conversation], output_filepath: str
@@ -195,7 +425,7 @@ class BaseInferenceEngine(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def infer_online(
+    def _infer_online(
         self,
         input: list[Conversation],
         inference_config: Optional[InferenceConfig] = None,
@@ -204,26 +434,6 @@ class BaseInferenceEngine(ABC):
 
         Args:
             input: A list of conversations to run inference on.
-            inference_config: Parameters for inference.
-
-        Returns:
-            List[Conversation]: Inference output.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def infer_from_file(
-        self,
-        input_filepath: str,
-        inference_config: Optional[InferenceConfig] = None,
-    ) -> list[Conversation]:
-        """Runs model inference on inputs in the provided file.
-
-        This is a convenience method to prevent boilerplate from asserting the existence
-        of input_filepath in the generation_params.
-
-        Args:
-            input_filepath: Path to the input file containing prompts for generation.
             inference_config: Parameters for inference.
 
         Returns:

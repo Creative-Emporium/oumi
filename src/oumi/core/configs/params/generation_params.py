@@ -21,11 +21,11 @@ from oumi.core.configs.params.guided_decoding_params import GuidedDecodingParams
 
 @dataclass
 class GenerationParams(BaseParams):
-    max_new_tokens: int = 256
+    max_new_tokens: int = 1024
     """The maximum number of new tokens to generate.
 
     This limits the length of the generated text to prevent excessively long outputs.
-    Default is 256 tokens.
+    Default is 1024 tokens.
     """
 
     batch_size: Optional[int] = 1
@@ -119,6 +119,15 @@ class GenerationParams(BaseParams):
 
     guided_decoding: Optional[GuidedDecodingParams] = None
     """Parameters for guided decoding."""
+
+    skip_special_tokens: bool = True
+    """Whether to skip special tokens when decoding the generated text.
+
+    When True (default), special tokens like <eos>, <pad>, etc. are removed from
+    the output text. When False, these tokens are included in the decoded text.
+    This can be useful for models that use special tokens as part of their output
+    format (e.g., reasoning tokens, tool call markers).
+    """
 
     def __post_init__(self):
         """Validates generation-specific parameters."""

@@ -16,8 +16,10 @@ import os
 from typing import Annotated, Final, Optional
 
 import typer
+from rich.table import Table
 
 import oumi.cli.cli_utils as cli_utils
+from oumi.cli.alias import AliasType, try_get_config_name_for_alias
 from oumi.utils.logging import logger
 
 _DEFAULT_CLI_PDF_DPI: Final[int] = 200
@@ -57,6 +59,7 @@ def infer(
         ),
     ] = None,
     level: cli_utils.LOG_LEVEL_TYPE = None,
+    verbose: cli_utils.VERBOSE_TYPE = False,
 ):
     """Run inference on a model.
 
@@ -73,12 +76,13 @@ def infer(
         image: Path to the input image for `image+text` VLLMs.
         system_prompt: System prompt for task-specific instructions.
         level: The logging level for the specified command.
+        verbose: Enable verbose logging with additional debug information.
     """
     extra_args = cli_utils.parse_extra_cli_args(ctx)
 
     config = str(
         cli_utils.resolve_and_fetch_config(
-            config,
+            try_get_config_name_for_alias(config, AliasType.INFER),
         )
     )
 
@@ -99,6 +103,11 @@ def infer(
         config, extra_args, logger=logger
     )
     parsed_config.finalize_and_validate()
+
+    if verbose:
+        # Print configuration for verification
+        parsed_config.print_config(logger)
+
     # https://stackoverflow.com/questions/62691279/how-to-disable-tokenizers-parallelism-true-false-warning
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -129,11 +138,16 @@ def infer(
         # Don't print results if output_filepath is provided.
         if parsed_config.output_path:
             return
-
+        table = Table(
+            title="Inference Results",
+            title_style="bold magenta",
+            show_edge=False,
+            show_lines=True,
+        )
+        table.add_column("Conversation", style="green")
         for generation in generations:
-            print("------------")
-            print(repr(generation))
-        print("------------")
+            table.add_row(repr(generation))
+        cli_utils.CONSOLE.print(table)
         return
     if not interactive:
         logger.warning(

@@ -66,7 +66,7 @@ def test_gemini_convert_conversation(gemini_engine, generation_params):
     )
 
     api_input = gemini_engine._convert_conversation_to_api_input(
-        conversation, generation_params
+        conversation, generation_params, gemini_engine._model_params
     )
 
     assert api_input["model"] == "gemini-model"
@@ -94,7 +94,7 @@ def test_gemini_convert_conversation_with_guided_decoding(
     )
 
     api_input = gemini_engine._convert_conversation_to_api_input(
-        conversation, generation_params
+        conversation, generation_params, gemini_engine._model_params
     )
 
     assert "response_format" in api_input
@@ -122,7 +122,7 @@ def test_gemini_convert_conversation_with_json_schema_variations(
     )
 
     api_input = gemini_engine._convert_conversation_to_api_input(
-        conversation, generation_params
+        conversation, generation_params, gemini_engine._model_params
     )
 
     assert "response_format" in api_input
@@ -141,7 +141,7 @@ def test_gemini_convert_conversation_invalid_schema(gemini_engine, generation_pa
 
     with pytest.raises(ValueError) as exc_info:
         gemini_engine._convert_conversation_to_api_input(
-            conversation, generation_params
+            conversation, generation_params, gemini_engine._model_params
         )
 
     assert "unsupported JSON schema type" in str(exc_info.value)
@@ -156,12 +156,19 @@ async def test_gemini_infer_online(gemini_engine, inference_config):
         ]
     )
 
-    with patch.object(gemini_engine, "_infer", new_callable=AsyncMock) as mock_infer:
-        mock_infer.return_value = [conversation]
-        results = gemini_engine.infer_online([conversation], inference_config)
+    with patch.object(
+        gemini_engine,
+        "_infer",
+        new_callable=AsyncMock,
+        side_effect=lambda convs, config: convs,
+    ):
+        results = gemini_engine.infer([conversation], inference_config)
 
     assert len(results) == 1
-    assert results[0] == conversation
+    assert results[0].messages == conversation.messages
+    assert results[0].metadata == conversation.metadata
+    if conversation.conversation_id is not None:
+        assert results[0].conversation_id == conversation.conversation_id
 
 
 def test_gemini_infer_from_file(gemini_engine, inference_config, tmp_path):
@@ -177,12 +184,20 @@ def test_gemini_infer_from_file(gemini_engine, inference_config, tmp_path):
         json.dump(conversation.to_dict(), f)
         f.write("\n")
 
-    with patch.object(gemini_engine, "_infer", new_callable=AsyncMock) as mock_infer:
-        mock_infer.return_value = [conversation]
-        results = gemini_engine.infer_from_file(str(input_file), inference_config)
+    with patch.object(
+        gemini_engine,
+        "_infer",
+        new_callable=AsyncMock,
+        side_effect=lambda convs, config: convs,
+    ):
+        inference_config.input_path = str(input_file)
+        results = gemini_engine.infer(inference_config=inference_config)
 
     assert len(results) == 1
-    assert results[0] == conversation
+    assert results[0].messages == conversation.messages
+    assert results[0].metadata == conversation.metadata
+    if conversation.conversation_id is not None:
+        assert results[0].conversation_id == conversation.conversation_id
 
 
 def test_gemini_batch_prediction_disabled(gemini_engine, inference_config):
@@ -194,3 +209,11 @@ def test_gemini_batch_prediction_disabled(gemini_engine, inference_config):
 
     with pytest.raises(NotImplementedError):
         gemini_engine.infer_batch([conversation], inference_config)
+
+
+def test_remote_params_defaults():
+    gemini_engine = GoogleGeminiInferenceEngine(
+        model_params=ModelParams(model_name="some_model"),
+    )
+    assert gemini_engine._remote_params.num_workers == 2
+    assert gemini_engine._remote_params.politeness_policy == 60.0

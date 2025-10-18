@@ -1,7 +1,7 @@
 # Phi3 vision vLLM inference config.
 #
 # Requirements:
-#   - Run `pip install vllm`
+#   - Run `pip install oumi[gpu]`
 #
 # Usage:
 #   oumi infer -i -c configs/recipes/vision/phi3/inference/vllm_infer.yaml \
@@ -22,6 +22,5 @@ model:
 
 generation:
   max_new_tokens: 64
-  batch_size: 1
 
 engine: VLLM

@@ -14,33 +14,46 @@
 
 import os
 import sys
+import traceback
 
 import typer
 
-from oumi.cli.cli_utils import CONTEXT_ALLOW_EXTRA_ARGS
+from oumi.cli.cache import card as cache_card
+from oumi.cli.cache import get as cache_get
+from oumi.cli.cache import ls as cache_ls
+from oumi.cli.cache import rm as cache_rm
+from oumi.cli.cli_utils import (
+    CONSOLE,
+    CONTEXT_ALLOW_EXTRA_ARGS,
+    create_github_issue_url,
+)
 from oumi.cli.distributed_run import accelerate, torchrun
 from oumi.cli.env import env
 from oumi.cli.evaluate import evaluate
 from oumi.cli.fetch import fetch
 from oumi.cli.infer import infer
-from oumi.cli.judge import conversations, dataset, model
-from oumi.cli.launch import cancel, down, status, stop, up, which
+from oumi.cli.judge import judge_conversations_file, judge_dataset_file
+from oumi.cli.launch import cancel, down, logs, status, stop, up, which
 from oumi.cli.launch import run as launcher_run
+from oumi.cli.quantize import quantize
+from oumi.cli.synth import synth
 from oumi.cli.train import train
+from oumi.utils.logging import should_use_rich_logging
 
-_ASCII_LOGO = """
-@@@@@@@@@@@@@@@@@@@
-@                 @
-@   @@@@@  @  @   @
-@   @   @  @  @   @
-@   @@@@@  @@@@   @
-@                 @
-@   @@@@@@@   @   @
-@   @  @  @   @   @
-@   @  @  @   @   @
-@                 @
-@@@@@@@@@@@@@@@@@@@
+_ASCII_LOGO = r"""
+   ____  _    _ __  __ _____
+  / __ \| |  | |  \/  |_   _|
+ | |  | | |  | | \  / | | |
+ | |  | | |  | | |\/| | | |
+ | |__| | |__| | |  | |_| |_
+  \____/ \____/|_|  |_|_____|
 """
+
+
+def experimental_features_enabled():
+    """Check if experimental features are enabled."""
+    is_enabled = os.environ.get("OUMI_ENABLE_EXPERIMENTAL_FEATURES", "False")
+    return is_enabled.lower() in ("1", "true", "yes", "on")
 
 
 def _oumi_welcome(ctx: typer.Context):
@@ -49,13 +62,15 @@ def _oumi_welcome(ctx: typer.Context):
     # Skip logo for rank>0 for multi-GPU jobs to reduce noise in logs.
     if int(os.environ.get("RANK", 0)) > 0:
         return
-    print(_ASCII_LOGO)
+    CONSOLE.print(_ASCII_LOGO, style="green", highlight=False)
 
 
 def get_app() -> typer.Typer:
     """Create the Typer CLI app."""
     app = typer.Typer(pretty_exceptions_enable=False)
-    app.callback()(_oumi_welcome)
+    app.callback(context_settings={"help_option_names": ["-h", "--help"]})(
+        _oumi_welcome
+    )
     app.command(
         context_settings=CONTEXT_ALLOW_EXTRA_ARGS,
         help="Evaluate a model.",
@@ -73,16 +88,30 @@ def get_app() -> typer.Typer:
     )(infer)
     app.command(
         context_settings=CONTEXT_ALLOW_EXTRA_ARGS,
+        help="Synthesize a dataset.",
+    )(synth)
+    app.command(  # Alias for synth
+        name="synthesize",
+        hidden=True,
+        context_settings=CONTEXT_ALLOW_EXTRA_ARGS,
+        help="🚧 [Experimental] Synthesize a dataset.",
+    )(synth)
+    app.command(
+        context_settings=CONTEXT_ALLOW_EXTRA_ARGS,
         help="Train a model.",
     )(train)
-
+    app.command(
+        context_settings=CONTEXT_ALLOW_EXTRA_ARGS,
+        help="Quantize a model.",
+    )(quantize)
     judge_app = typer.Typer(pretty_exceptions_enable=False)
-    judge_app.command(context_settings=CONTEXT_ALLOW_EXTRA_ARGS)(conversations)
-    judge_app.command(context_settings=CONTEXT_ALLOW_EXTRA_ARGS)(dataset)
-    judge_app.command(context_settings=CONTEXT_ALLOW_EXTRA_ARGS)(model)
-    app.add_typer(
-        judge_app, name="judge", help="Judge datasets, models or conversations."
+    judge_app.command(name="dataset", context_settings=CONTEXT_ALLOW_EXTRA_ARGS)(
+        judge_dataset_file
     )
+    judge_app.command(name="conversations", context_settings=CONTEXT_ALLOW_EXTRA_ARGS)(
+        judge_conversations_file
+    )
+    app.add_typer(judge_app, name="judge", help="Judge datasets or conversations.")
 
     launch_app = typer.Typer(pretty_exceptions_enable=False)
     launch_app.command(help="Cancels a job.")(cancel)
@@ -96,6 +125,7 @@ def get_app() -> typer.Typer:
         context_settings=CONTEXT_ALLOW_EXTRA_ARGS, help="Launches a job."
     )(up)
     launch_app.command(help="Prints the available clouds.")(which)
+    launch_app.command(help="Gets the logs of a job.")(logs)
     app.add_typer(launch_app, name="launch", help="Launch jobs remotely.")
 
     distributed_app = typer.Typer(pretty_exceptions_enable=False)
@@ -114,13 +144,45 @@ def get_app() -> typer.Typer:
         help="Fetch configuration files from the oumi GitHub repository.",
     )(fetch)
 
+    cache_app = typer.Typer(pretty_exceptions_enable=False)
+    cache_app.command(name="ls", help="List locally cached items.")(cache_ls)
+    cache_app.command(name="get", help="Download a repository from Hugging Face.")(
+        cache_get
+    )
+    cache_app.command(name="card", help="Show information for a repository.")(
+        cache_card
+    )
+    cache_app.command(name="rm", help="Remove a repository from the local cache.")(
+        cache_rm
+    )
+    app.add_typer(cache_app, name="cache", help="Manage local Hugging Face cache.")
+
     return app
 
 
 def run():
     """The entrypoint for the CLI."""
     app = get_app()
-    return app()
+    try:
+        return app()
+    except Exception as e:
+        tb_str = traceback.format_exc()
+        CONSOLE.print(tb_str)
+        issue_url = create_github_issue_url(e, tb_str)
+        CONSOLE.print(
+            "\n[red]If you believe this is a bug, please file an issue:[/red]"
+        )
+        if should_use_rich_logging():
+            CONSOLE.print(
+                f"📝 [yellow]Templated issue:[/yellow] "
+                f"[link={issue_url}]Click here to report[/link]"
+            )
+        else:
+            CONSOLE.print(
+                "https://github.com/oumi-ai/oumi/issues/new?template=bug-report.yaml"
+            )
+
+        sys.exit(1)
 
 
 if "sphinx" in sys.modules:

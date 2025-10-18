@@ -16,7 +16,10 @@ import copy
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
+
+if TYPE_CHECKING:
+    from oumi.core.configs.training_config import TrainingConfig
 
 import transformers
 import trl
@@ -45,6 +48,13 @@ class TrainerType(Enum):
     for fine-tuning language models based on human preferences.
     """
 
+    TRL_KTO = "trl_kto"
+    """Kahneman-Tversky Optimization trainer from `trl` library.
+
+    This trainer implements the KTO algorithm for fine-tuning language models
+    based on binary feedback (desirable/undesirable) rather than preference pairs.
+    """
+
     TRL_GRPO = "trl_grpo"
     """Group Relative Policy Optimization trainer from `trl` library.
 
@@ -66,6 +76,15 @@ class TrainerType(Enum):
 
     This is a custom trainer implementation specific to the Oumi project,
     designed to provide additional flexibility and features.
+    """
+
+    VERL_GRPO = "verl_grpo"
+    """Group Relative Policy Optimization trainer from `verl` library.
+
+    This trainer implements the Group Relative Policy Optimization algorithm
+    introduced in the paper https://arxiv.org/pdf/2402.03300
+    for fine-tuning language models.
+    Optionally, supports user-defined reward functions.
     """
 
 
@@ -153,7 +172,10 @@ class TrainingParams(BaseParams):
     - HF: HuggingFace's Trainer
     - TRL_SFT: TRL's SFT Trainer
     - TRL_DPO: TRL's DPO Trainer
+    - TRL_KTO: TRL's KTO Trainer
+    - TRL_GRPO: TRL's GRPO Trainer
     - OUMI: Custom generic trainer implementation
+    - VERL_GRPO: verl's GRPO Trainer
     """
 
     enable_gradient_checkpointing: bool = False
@@ -312,8 +334,14 @@ class TrainingParams(BaseParams):
     """The names of the reward function in the Oumi registry to use for reinforcement
     learning.
 
-    Only supported with the TRL_GRPO trainer currently. Refer to
-    https://huggingface.co/docs/trl/main/en/grpo_trainer
+    Only supported with the TRL_GRPO and VERL_GRPO trainers. Currently,
+    VERL_GRPO only supports specifying a single reward function.
+
+    For TRL_GRPO, refer to https://huggingface.co/docs/trl/main/en/grpo_trainer
+    for documentation about the function signature.
+
+    For VERL_GRPO, refer to
+    https://verl.readthedocs.io/en/latest/preparation/reward_function.html
     for documentation about the function signature.
     """
 
@@ -332,6 +360,12 @@ class TrainingParams(BaseParams):
     Possible values are "debug", "info", "warning", "error", "critical".
     """
 
+    log_examples: bool = False
+    """Whether to log an example of the data in the first step for debugging purposes.
+
+    If True, the example will be logged to the console.
+    """
+
     enable_wandb: bool = False
     """Whether to enable Weights & Biases (wandb) logging.
 
@@ -341,6 +375,16 @@ class TrainingParams(BaseParams):
 
     After enabling, you must set the `WANDB_API_KEY` environment variable.
     Alternatively, you can use the `wandb login` command to authenticate.
+    """
+
+    enable_mlflow: bool = False
+    """Whether to enable MLflow logging.
+
+    If True, MLflow will be used for experiment tracking and visualization.
+    If you want to use MLflow, you must set the `MLFLOW_TRACKING_URI` environment
+    variable to specify the tracking server URI and the `MLFLOW_EXPERIMENT_ID` or
+    `MLFLOW_EXPERIMENT_NAME` environment variable to specify the experiment to report
+    the run to.
     """
 
     enable_tensorboard: bool = True
@@ -586,11 +630,35 @@ class TrainingParams(BaseParams):
     """
 
     trainer_kwargs: dict[str, Any] = field(default_factory=dict)
-    """Additional keyword arguments to pass to the Trainer.
+    """Additional keyword arguments to pass to the HF/TRL Trainer.
 
     This allows for customization of the Trainer beyond the standard parameters
     defined in this class. Any key-value pairs added here will be passed directly
-    to the Trainer's constructor.
+    to the Trainer's constructor. Note that this field is only used for
+    HuggingFace and TRL trainers (TRL_SFT, TRL_DPO, TRL_GRPO, HF).
+    """
+
+    verl_config_overrides: dict[str, Any] = field(default_factory=dict)
+    """Values to override in the verl config.
+
+    This field is only used for the `VERL_GRPO` trainer.
+    To see supported params in verl, see:
+    https://verl.readthedocs.io/en/latest/examples/config.html
+
+    The verl config is a nested dict, so the kwargs should be structured accordingly.
+    For example, to set `actor_rollout_ref.actor.use_kl_loss` to `True`, you can use:
+    `{"actor_rollout_ref": {"actor": {"use_kl_loss": True}}}`.
+
+    The priority of setting verl config params, from highest to lowest, is:
+
+        1. Values specified by this field.
+        2. Values automatically set by Oumi in
+           `src/oumi/core/trainers/verl_grpo_trainer.py:_create_config()`
+           for verl params
+           which have corresponding Oumi params. For example,
+           Oumi's `training.output_dir` -> verl's `trainer.default_local_dir`
+        3. Default verl config values in
+           `src/oumi/core/trainers/verl_trainer_config.yaml`.
     """
 
     profiler: ProfilerParams = field(default_factory=ProfilerParams)
@@ -627,8 +695,25 @@ class TrainingParams(BaseParams):
     which is 10min.
     """
 
-    def to_hf(self):
-        """Converts Oumi config to HuggingFace's TrainingArguments."""
+    label_ignore_index: Optional[int] = None
+    """Tokens with this label value don't contribute to the loss computation.
+    For example, this can be `PAD`, or image tokens. `-100` is the PyTorch convention.
+    Refer to the `ignore_index` parameter of `torch.nn.CrossEntropyLoss()`
+    for more details.
+
+    If unspecified (`None`), then the default model-specific preferences
+    configured in Oumi may be used.
+
+    Users should only set `label_ignore_index` if the default behavior is
+    not satisfactory, or for new models not yet fully-integrated by Oumi.
+    """
+
+    def to_hf(self, training_config: Optional["TrainingConfig"] = None):
+        """Converts Oumi config to HuggingFace's TrainingArguments.
+
+        Args:
+            training_config: Optional TrainingConfig to access DeepSpeed parameters.
+        """
         save_strategy: str = "no"
         if self.save_epoch:
             save_strategy = "epoch"
@@ -661,12 +746,26 @@ class TrainingParams(BaseParams):
             config_class = trl.SFTConfig
         elif self.trainer_type == TrainerType.TRL_DPO:
             config_class = trl.DPOConfig
+        elif self.trainer_type == TrainerType.TRL_KTO:
+            config_class = trl.KTOConfig
         elif self.trainer_type == TrainerType.TRL_GRPO:
             config_class = trl.GRPOConfig
         else:
             config_class = transformers.TrainingArguments
 
         trainer_kwargs = copy.deepcopy(self.trainer_kwargs)
+
+        # Add DeepSpeed configuration if enabled
+        # NOTE: DeepSpeed config is passed directly to trainer_kwargs instead of through
+        # TrainingArguments because (1) DeepSpeed expects either a file path or complete
+        # dictionary structure, and (2) the deeply nested DeepSpeed parameters don't map
+        # well to TrainingArguments' flat parameter model.
+        if training_config is not None and training_config.deepspeed.enable_deepspeed:
+            from oumi.core.distributed import get_deepspeed_config_path_or_dict
+
+            deepspeed_config = get_deepspeed_config_path_or_dict(training_config)
+            trainer_kwargs["deepspeed"] = deepspeed_config
+
         if self.trainer_type == TrainerType.TRL_GRPO:
             grpo_kwargs = self.grpo.to_hf_trainer_kwargs()
             conflicting_keys = set(trainer_kwargs.keys()).intersection(
@@ -716,7 +815,6 @@ class TrainingParams(BaseParams):
             save_strategy=save_strategy,
             logging_first_step=self.logging_first_step,
             torch_empty_cache_steps=self.empty_device_cache_steps,
-            resume_from_checkpoint=self.resume_from_checkpoint,
             eval_strategy=self.eval_strategy,
             eval_steps=self.eval_steps,
             dataloader_num_workers=dataloader_num_workers,
@@ -755,6 +853,8 @@ class TrainingParams(BaseParams):
             report_to.append("wandb")
         if self.enable_tensorboard:
             report_to.append("tensorboard")
+        if self.enable_mlflow:
+            report_to.append("mlflow")
         if len(report_to) == 0:
             report_to.append("none")
         return report_to
@@ -786,14 +886,30 @@ class TrainingParams(BaseParams):
 
         if (
             self.trainer_type != TrainerType.TRL_GRPO
+            and self.trainer_type != TrainerType.VERL_GRPO
             and self.reward_functions is not None
         ):
             function_names = [name for name in self.reward_functions if name]
             if len(function_names) > 0:
                 raise ValueError(
-                    "reward_functions may only be defined for the TRL_GRPO trainer. "
-                    f"Actual: {self.trainer_type}"
+                    "reward_functions may only be defined for the TRL_GRPO or VERL_GRPO"
+                    f"trainers. Actual: {self.trainer_type}"
                 )
+            if self.trainer_type == TrainerType.VERL_GRPO:
+                if len(function_names) > 1:
+                    raise ValueError(
+                        "VERL_GRPO only supports a single reward function. "
+                        f"Actual: {function_names}"
+                    )
+
+        # TODO: #1540 - Remove when TRL bug is fixed.
+        if (
+            self.trainer_type == TrainerType.TRL_GRPO
+            and self.include_performance_metrics
+        ):
+            raise ValueError(
+                "`include_performance_metrics` is not supported for TRL_GRPO trainer."
+            )
 
     @property
     def telemetry_dir(self) -> Optional[Path]:

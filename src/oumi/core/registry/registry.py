@@ -14,7 +14,6 @@
 
 import functools
 import importlib.util
-import inspect
 import os
 import sys
 from collections import namedtuple
@@ -34,6 +33,7 @@ class RegistryType(Enum):
     MODEL = auto()
     JUDGE_CONFIG = auto()
     EVALUATION_FUNCTION = auto()
+    SAMPLE_ANALYZER = auto()
 
 
 class RegistryKey(namedtuple("RegistryKey", ["name", "registry_type"])):
@@ -93,8 +93,8 @@ def _register_dependencies(cls_function):
             # Immediately set the initialized flag to avoid infinite recursion.
             self._initialized = True
             # Import all core dependencies.
+            import oumi.core.analyze  # noqa: F401
             import oumi.datasets  # noqa: F401
-            import oumi.judges  # noqa: F401
             import oumi.launcher  # noqa: F401
             import oumi.models  # noqa: F401
 
@@ -191,6 +191,10 @@ class Registry:
     def get_evaluation_function(self, name: str) -> Optional[Callable]:
         """Gets a record that corresponds to a registered evaluation function."""
         return self.get(name, RegistryType.EVALUATION_FUNCTION)
+
+    def get_sample_analyzer(self, name: str) -> Optional[Callable]:
+        """Gets a record that corresponds to a registered sample analyzer."""
+        return self.get(name, RegistryType.SAMPLE_ANALYZER)
 
     def get_dataset(
         self, name: str, subset: Optional[str] = None
@@ -301,36 +305,6 @@ def register_cloud_builder(registry_name: str) -> Callable:
     return decorator_register
 
 
-def register_judge(registry_name: str) -> Callable:
-    """Returns a function to register a judge configuration in the Oumi global registry.
-
-    This decorator is used to register judge configuration in the global registry.
-    A judge configuration function typically returns a JudgeConfig object that defines
-    the parameters and attributes for a specific judge.
-
-    Args:
-        registry_name: The name under which the judge configuration should be
-            registered.
-
-    Returns:
-        Callable: A decorator function that registers the target judge configuration.
-
-    Example:
-         .. code-block:: python
-
-            @register_judge("my_custom_judge")
-            def my_judge_config() -> JudgeConfig:
-                return JudgeConfig(...)
-    """
-
-    def decorator_register(obj):
-        """Decorator to register its target builder."""
-        REGISTRY.register(name=registry_name, type=RegistryType.JUDGE_CONFIG, value=obj)
-        return obj
-
-    return decorator_register
-
-
 def register_evaluation_function(registry_name: str) -> Callable:
     """Returns function to register an evaluation function in the Oumi global registry.
 
@@ -349,26 +323,32 @@ def register_evaluation_function(registry_name: str) -> Callable:
                 f"`{RegistryType.EVALUATION_FUNCTION}` must be callable."
             )
 
-        signature = inspect.signature(evaluation_fn)
-        if (
-            "task_params" not in signature.parameters
-            or "config" not in signature.parameters
-        ):
-            raise TypeError(
-                f"The evaluation function ({registry_name}) can not be registered "
-                "because it does not have the correct signature. This function "
-                "must have `task_params` (type: `EvaluationTaskParams`) and `config` "
-                "(type: `EvaluationConfig`) as input arguments and return a value "
-                "(type:`EvaluationResult`). However, the signature that was provided "
-                f"is: {inspect.signature(evaluation_fn)}"
-            )
-
     def decorator_register(obj):
         """Decorator to register its target `obj`."""
         check_evaluation_function_signature(obj)
 
         REGISTRY.register(
             name=registry_name, type=RegistryType.EVALUATION_FUNCTION, value=obj
+        )
+        return obj
+
+    return decorator_register
+
+
+def register_sample_analyzer(registry_name: str) -> Callable:
+    """Returns function to register a sample analyzer in the Oumi global registry.
+
+    Args:
+        registry_name: The name that the sample analyzer should be registered with.
+
+    Returns:
+        Decorator function to register the target sample analyzer.
+    """
+
+    def decorator_register(obj):
+        """Decorator to register its target `obj`."""
+        REGISTRY.register(
+            name=registry_name, type=RegistryType.SAMPLE_ANALYZER, value=obj
         )
         return obj
 

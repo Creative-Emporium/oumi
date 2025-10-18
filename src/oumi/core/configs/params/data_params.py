@@ -180,10 +180,7 @@ class DatasetParams(BaseParams):
 @dataclass
 class DatasetSplitParams(BaseParams):
     datasets: list[DatasetParams] = field(default_factory=list)
-    """The input datasets used for training.
-
-    This will later be split into train, test, and validation.
-    """
+    """The datasets in this split."""
 
     collator_name: Optional[str] = None
     """Name of Oumi data collator.
@@ -198,6 +195,13 @@ class DatasetSplitParams(BaseParams):
             for image+text multi-modal data.
 
     If None, then a default collator will be assigned.
+    """
+
+    collator_kwargs: dict[str, Any] = field(default_factory=dict)
+    """Additional keyword arguments to pass to the collator constructor.
+
+    These arguments will be passed directly to the collator constructor
+    and can be used to customize collator behavior beyond the default parameters.
     """
 
     pack: bool = False
@@ -248,41 +252,14 @@ class DatasetSplitParams(BaseParams):
     If set to `None` mixing will be non-deterministic.
     """
 
-    use_async_dataset: bool = False
-    """Whether to use the PretrainingAsyncTextDataset instead of ConstantLengthDataset.
-
-    Deprecated:
-        This parameter is deprecated and will be removed in the future.
-    """
-
     use_torchdata: Optional[bool] = None
     """Whether to use the `torchdata` library for dataset loading and processing.
 
     If set to `None`, this setting may be auto-inferred.
     """
 
-    # EXPERIMENTAL PARAMS -------------------------
-
-    # END EXPERIMENTAL PARAMS --------------------
-
     def __post_init__(self):
         """Verifies params."""
-        if any([dataset.mixture_proportion is not None for dataset in self.datasets]):
-            if not all(
-                [dataset.mixture_proportion is not None for dataset in self.datasets]
-            ):
-                raise ValueError(
-                    "If `mixture_proportion` is specified it must be "
-                    " specified for all datasets"
-                )
-            mix_sum = sum(
-                filter(None, [dataset.mixture_proportion for dataset in self.datasets])
-            )
-            if not self._is_sum_normalized(mix_sum):
-                raise ValueError(
-                    "The sum of `mixture_proportion` must be 1.0. "
-                    f"The current sum is {mix_sum} ."
-                )
         if any([dataset.mixture_proportion is not None for dataset in self.datasets]):
             if not all(
                 [dataset.mixture_proportion is not None for dataset in self.datasets]
@@ -321,7 +298,7 @@ class DataParams(BaseParams):
     """The input datasets used for training."""
 
     test: DatasetSplitParams = field(default_factory=DatasetSplitParams)
-    """The input datasets used for testing."""
+    """The input datasets used for testing. This field is currently unused."""
 
     validation: DatasetSplitParams = field(default_factory=DatasetSplitParams)
     """The input datasets used for validation."""
@@ -337,8 +314,11 @@ class DataParams(BaseParams):
         else:
             raise ValueError(f"Received invalid split: {split}.")
 
-    def __post_init__(self):
+    def __finalize_and_validate__(self):
         """Verifies params."""
+        if len(self.train.datasets) == 0:
+            raise ValueError("At least one training dataset is required.")
+
         all_collators = set()
         if self.train.collator_name:
             all_collators.add(self.train.collator_name)

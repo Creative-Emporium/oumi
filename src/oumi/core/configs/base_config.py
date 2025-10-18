@@ -86,6 +86,23 @@ class BaseConfig:
         return cast(T, config)
 
     @classmethod
+    def from_str(cls: type[T], config_str: str) -> T:
+        """Loads a configuration from a YAML string.
+
+        Args:
+            config_str: The YAML string.
+
+        Returns:
+            BaseConfig: The configuration object.
+        """
+        schema = OmegaConf.structured(cls)
+        file_config = OmegaConf.create(config_str)
+        config = OmegaConf.to_object(OmegaConf.merge(schema, file_config))
+        if not isinstance(config, cls):
+            raise TypeError(f"config is not {cls}")
+        return cast(T, config)
+
+    @classmethod
     def from_yaml_and_arg_list(
         cls: type[T],
         config_path: Optional[str],
@@ -155,6 +172,18 @@ class BaseConfig:
             raise TypeError(f"config {type(config)} is not {type(cls)}")
 
         return cast(T, config)
+
+    def print_config(self, logger: Optional[logging.Logger] = None) -> None:
+        """Prints the configuration in a human-readable format.
+
+        Args:
+            logger: Optional logger to use. If None, uses module logger.
+        """
+        if logger is None:
+            logger = logging.getLogger(__name__)
+
+        config_yaml = OmegaConf.to_yaml(self, resolve=True)
+        logger.info(f"Configuration:\n{config_yaml}")
 
     def finalize_and_validate(self) -> None:
         """Finalizes and validates the top level params objects."""

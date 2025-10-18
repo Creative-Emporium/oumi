@@ -33,8 +33,6 @@ class PretrainingAsyncTextDataset(IterableDataset):
     """Iterable dataset that returns constant length chunks of tokens.
 
     Prefetches, formats, and tokenizes asynchronously from main thread.
-
-    Based on TRL's ConstantLengthDataset class.
     """
 
     def __init__(
@@ -134,6 +132,11 @@ class PretrainingAsyncTextDataset(IterableDataset):
             self.formatting_func = lambda x: x[dataset_text_field]
         else:
             self.formatting_func = lambda x: x
+
+    @property
+    def column_names(self) -> list[str]:
+        """Returns the column names of the dataset."""
+        return ["input_ids", "labels"]
 
     def _add_example_to_queue(self, example):
         """Adds a single example to the queue."""
