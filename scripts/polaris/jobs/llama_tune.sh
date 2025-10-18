@@ -110,8 +110,8 @@ if ! (echo "${ALLOWED_MODEL_SIZES[@]}" | grep -q -w "${MODEL_SIZE}"); then
 fi
 
 if "${ENABLE_OUMI_TELEMETRY}"; then
-    OUMI_TELEMETRY_PARAMS="training.telemetry.collect_telemetry_for_all_ranks=true
-    training.telemetry.track_gpu_temperature=true"
+    OUMI_TELEMETRY_PARAMS="--training.telemetry.collect_telemetry_for_all_ranks true
+    --training.telemetry.track_gpu_temperature true"
     echo "Oumi telemetry enabled!"
 fi
 
@@ -121,13 +121,13 @@ export TOKENIZERS_PARALLELISM=false
 
 # Training params shared between the different training modes, and likely
 # don't need to be modified during experimentation.
-SHARED_TRAINING_PARAMS="training.run_name='polaris.llama${MODEL_SIZE}.${TRAINING_MODE}.${OUMI_JOBNUM}'
-training.output_dir=/eagle/community_ai/${USER}/runs/llama${MODEL_SIZE}.${TRAINING_MODE}.${OUMI_JOBNUM}
+SHARED_TRAINING_PARAMS="--training.run_name 'polaris.llama${MODEL_SIZE}.${TRAINING_MODE}.${OUMI_JOBNUM}'
+--training.output_dir /eagle/community_ai/${USER}/runs/llama${MODEL_SIZE}.${TRAINING_MODE}.${OUMI_JOBNUM}
 ${OUMI_TELEMETRY_PARAMS}"
 
 if [ "$TRAINING_MODE" == "pretrain" ]; then
 # Local copy of "HuggingFaceFW/fineweb-edu" dataset stored on Polaris.
-PRETRAIN_DATASETS="data.train.datasets=
+PRETRAIN_DATASETS="--data.train.datasets=
 - dataset_name: '/eagle/community_ai/datasets/fineweb-edu/sample-10BT'
   subset: 'default'
   split: 'train'
@@ -146,7 +146,7 @@ if [ "$MODEL_SIZE" == "3b" ]; then
             OUMI_CFG_FILE="configs/recipes/llama3_2/sft/3b_qlora/train.yaml"
         else # FFT
             OUMI_CFG_FILE="configs/recipes/llama3_2/sft/3b_full/train.yaml"
-            ADDITIONAL_TRAINING_PARAMS="model.model_max_length=512"
+            ADDITIONAL_TRAINING_PARAMS="--model.model_max_length 512"
         fi
     else # FSDP
         echo "Llama 3B FSDP is currently not supported!"
@@ -156,11 +156,11 @@ elif [ "$MODEL_SIZE" == "8b" ]; then
     # Copy 8B weights from Eagle to local scratch.
     if [ "$TRAINING_MODE" == "pretrain" ]; then
     copyModelToLocalScratch \
-        "models--meta-llama--Meta-Llama-3.1-8B" \
+        "models--meta-llama--Llama-3.1-8B" \
         "8d10549bcf802355f2d6203a33ed27e81b15b9e5"
     else
     copyModelToLocalScratch \
-        "models--meta-llama--Meta-Llama-3.1-8B-Instruct" \
+        "models--meta-llama--Llama-3.1-8B-Instruct" \
         "0e9e39f249a16976918f6564b8830bc894c89659"
     fi
     if [ "$DISTRIBUTION_MODE" == "ddp" ]; then
@@ -188,7 +188,7 @@ elif [ "$MODEL_SIZE" == "8b" ]; then
 elif [ "$MODEL_SIZE" == "70b" ]; then
     # Copy 70B weights from Eagle to local scratch.
     copyModelToLocalScratch \
-        "models--meta-llama--Meta-Llama-3.1-70B-Instruct" \
+        "models--meta-llama--Llama-3.1-70B-Instruct" \
         "945c8663693130f8be2ee66210e062158b2a9693"
 
     if [ "$TRAINING_MODE" == "pretrain" ]; then
@@ -210,7 +210,7 @@ else # 405B
     # Copy 405B weights from Eagle to local scratch. This reduces the total time
     # needed to load the model from 3 hours to 15 min copy + 10 min loading.
     copyModelToLocalScratch \
-        "models--meta-llama--Meta-Llama-3.1-405B-Instruct" \
+        "models--meta-llama--Llama-3.1-405B-Instruct" \
         "be673f326cab4cd22ccfef76109faf68e41aa5f1"
 
     # https://pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf
@@ -236,13 +236,8 @@ fi
 # The PRETRAIN_DATASETS line evaluates to an empty string if PRETRAIN_DATASETS is not
 # set, and the properly quoted value if set.
 set -x
-torchrun \
-    --nnodes=${OUMI_NUM_NODES} \
-    --node-rank=${POLARIS_NODE_RANK} \
-    --nproc-per-node=${OUMI_POLARIS_NUM_GPUS_PER_NODE} \
-    --master-addr=${OUMI_MASTER_ADDR} \
-    --master-port=8007 \
-    -m oumi.train \
+oumi distributed torchrun \
+    -m oumi train \
     -c "${OUMI_CFG_FILE}" \
     ${PRETRAIN_DATASETS:+"$PRETRAIN_DATASETS"} \
     $SHARED_TRAINING_PARAMS \

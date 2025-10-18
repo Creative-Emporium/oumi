@@ -15,6 +15,7 @@ from oumi.core.configs import (
 from oumi.core.configs.params.training_params import TrainingParams
 from oumi.core.distributed import (
     DeviceRankInfo,
+    _parse_rank,
     all_gather_object,
     estimate_dataloader_num_workers,
     get_accelerate_env_vars,
@@ -237,6 +238,7 @@ def test_decorators_with_distributed(
     mock_work_function,
     mock_oumi_barrier,
     mock_torch_barrier,
+    mock_device_rank_info,
 ):
     # The decorated function should be executed
     # exaclty once and call barrier exactly once
@@ -345,7 +347,7 @@ def test_get_accelerate_env_vars_default():
         "FSDP_BACKWARD_PREFETCH": "BACKWARD_PRE",
         "FSDP_FORWARD_PREFETCH": "false",
         "FSDP_STATE_DICT_TYPE": "FULL_STATE_DICT",
-        "FSDP_AUTO_WRAP_POLICY": "SIZE_BASED_WRAP",
+        "FSDP_AUTO_WRAP_POLICY": "NO_WRAP",
         "FSDP_MIN_NUM_PARAMS": "100000",
         "FSDP_SYNC_MODULE_STATES": "true",
         "FSDP_ACTIVATION_CHECKPOINTING": "false",
@@ -367,7 +369,8 @@ def test_get_accelerate_env_vars():
         min_num_params=100000000,
     )
     config = TrainingConfig(
-        fsdp=fsdp_params, training=TrainingParams(enable_gradient_checkpointing=True)
+        fsdp=fsdp_params,
+        training=TrainingParams(enable_gradient_checkpointing=True, use_peft=True),
     )
 
     env_vars = get_accelerate_env_vars(config)
@@ -376,7 +379,7 @@ def test_get_accelerate_env_vars():
         "ACCELERATE_DYNAMO_MODE": "default",
         "ACCELERATE_DYNAMO_USE_FULLGRAPH": "False",
         "ACCELERATE_DYNAMO_USE_DYNAMIC": "False",
-        "FSDP_USE_ORIG_PARAMS": "true",
+        "FSDP_USE_ORIG_PARAMS": "false",
         "FSDP_CPU_RAM_EFFICIENT_LOADING": "true",
         "ACCELERATE_USE_FSDP": "true",
         "FSDP_SHARDING_STRATEGY": "HYBRID_SHARD",
@@ -390,6 +393,35 @@ def test_get_accelerate_env_vars():
         "FSDP_MIN_NUM_PARAMS": "100000000",
         "FSDP_SYNC_MODULE_STATES": "false",
         "FSDP_ACTIVATION_CHECKPOINTING": "true",
+    }
+
+
+def test_get_accelerate_env_vars_compile_keep_use_orig_params():
+    fsdp_params = FSDPParams(
+        enable_fsdp=True,
+    )
+    config = TrainingConfig(
+        fsdp=fsdp_params,
+        training=TrainingParams(use_peft=True, compile=True),
+    )
+    env_vars = get_accelerate_env_vars(config)
+    assert env_vars == {
+        "ACCELERATE_DYNAMO_BACKEND": "NO",
+        "ACCELERATE_DYNAMO_MODE": "default",
+        "ACCELERATE_DYNAMO_USE_FULLGRAPH": "False",
+        "ACCELERATE_DYNAMO_USE_DYNAMIC": "False",
+        "FSDP_USE_ORIG_PARAMS": "true",
+        "FSDP_CPU_RAM_EFFICIENT_LOADING": "true",
+        "ACCELERATE_USE_FSDP": "true",
+        "FSDP_SHARDING_STRATEGY": "FULL_SHARD",
+        "FSDP_OFFLOAD_PARAMS": "false",
+        "FSDP_BACKWARD_PREFETCH": "BACKWARD_PRE",
+        "FSDP_FORWARD_PREFETCH": "false",
+        "FSDP_STATE_DICT_TYPE": "FULL_STATE_DICT",
+        "FSDP_AUTO_WRAP_POLICY": "NO_WRAP",
+        "FSDP_MIN_NUM_PARAMS": "100000",
+        "FSDP_SYNC_MODULE_STATES": "true",
+        "FSDP_ACTIVATION_CHECKPOINTING": "false",
     }
 
 
@@ -409,7 +441,7 @@ def test_prepare_accelerate_fsdp_run():
         "FSDP_BACKWARD_PREFETCH": "BACKWARD_PRE",
         "FSDP_FORWARD_PREFETCH": "false",
         "FSDP_STATE_DICT_TYPE": "FULL_STATE_DICT",
-        "FSDP_AUTO_WRAP_POLICY": "SIZE_BASED_WRAP",
+        "FSDP_AUTO_WRAP_POLICY": "NO_WRAP",
         "FSDP_MIN_NUM_PARAMS": "100000",
         "FSDP_SYNC_MODULE_STATES": "true",
         "FSDP_ACTIVATION_CHECKPOINTING": "true",
@@ -432,7 +464,7 @@ def test_prepare_accelerate_fsdp_run_override():
         "FSDP_BACKWARD_PREFETCH": "BACKWARD_PRE",
         "FSDP_FORWARD_PREFETCH": "false",
         "FSDP_STATE_DICT_TYPE": "FULL_STATE_DICT",
-        "FSDP_AUTO_WRAP_POLICY": "SIZE_BASED_WRAP",
+        "FSDP_AUTO_WRAP_POLICY": "NO_WRAP",
         "FSDP_MIN_NUM_PARAMS": "100000",
         "FSDP_SYNC_MODULE_STATES": "true",
         "FSDP_ACTIVATION_CHECKPOINTING": "false",
@@ -453,3 +485,33 @@ def test_prepare_accelerate_fsdp_run_override():
             "`EXISTING_VALUE`, overriding to new value `NO`."
         )
     assert env_vars == expected_env_vars
+
+
+@pytest.mark.parametrize(
+    "rank_input,expected",
+    [("1", 1), ("5", 5), ("42", 42), ("100", 100), ("0", 0), ("-1", 0), ("  -1  ", 0)],
+)
+def test_parse_rank(rank_input, expected):
+    """Test that _parse_rank returns correct integer for valid positive rank strings."""
+    assert _parse_rank(rank_input) == expected
+
+
+def test_parse_rank_invalid_non_digit():
+    """Test that _parse_rank raises ValueError for non-digit strings."""
+    with pytest.raises(ValueError, match=r"Rank must be a number\. Actual: abc\."):
+        _parse_rank("abc")
+
+    with pytest.raises(ValueError, match=r"Rank must be a number\. Actual: 1a\."):
+        _parse_rank("1a")
+
+    with pytest.raises(ValueError, match=r"Rank must be a number\. Actual: a1\."):
+        _parse_rank("a1")
+
+
+def test_parse_rank_invalid_negative():
+    """Test that _parse_rank raises ValueError for negative numbers (except -1)."""
+    with pytest.raises(ValueError, match=r"Rank must be a number\. Actual: -2\."):
+        _parse_rank("-2")
+
+    with pytest.raises(ValueError, match=r"Rank must be a number\. Actual: -10\."):
+        _parse_rank("-10")

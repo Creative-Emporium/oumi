@@ -1,15 +1,39 @@
+# Copyright 2025 - Oumi
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import functools
+import importlib.util
+import os
+import sys
 from collections import namedtuple
 from enum import Enum, auto
+from pathlib import Path
 from typing import Any, Callable, Optional
+
+from oumi.utils.logging import logger
 
 
 class RegistryType(Enum):
     CLOUD = auto()
     DATASET = auto()
     METRICS_FUNCTION = auto()
+    REWARD_FUNCTION = auto()
     MODEL_CONFIG = auto()
     MODEL = auto()
     JUDGE_CONFIG = auto()
+    EVALUATION_FUNCTION = auto()
+    SAMPLE_ANALYZER = auto()
 
 
 class RegistryKey(namedtuple("RegistryKey", ["name", "registry_type"])):
@@ -26,7 +50,67 @@ class RegistryKey(namedtuple("RegistryKey", ["name", "registry_type"])):
         return super().__new__(cls, name.lower(), registry_type)
 
 
+def _load_user_requirements(requirements_file: str):
+    """Loads user-defined requirements from a file."""
+    logger.info(f"Loading user-defined registry from: {requirements_file}")
+    logger.info(
+        "This value can be set using the OUMI_EXTRA_DEPS_FILE environment variable."
+    )
+    requirements_path = Path(requirements_file)
+    if not requirements_path.exists():
+        logger.error(f"OUMI_EXTRA_DEPS_FILE file not found: {requirements_file}")
+        raise FileNotFoundError(
+            f"OUMI_EXTRA_DEPS_FILE file not found: {requirements_file}"
+        )
+    with open(requirements_path) as f:
+        import_count = 0
+        for idx, line in enumerate(f):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            import_count += 1
+            import_path = Path(line)
+            logger.info(f"Loading user-defined registry module: {import_path}")
+            mod_name = import_path.stem
+            sys.path.append(str(import_path.parent))
+            try:
+                importlib.import_module(mod_name)
+            except Exception as e:
+                logger.error(
+                    "Failed to load a user-defined module in "
+                    f"OUMI_EXTRA_DEPS_FILE: {line}"
+                )
+                raise ImportError(f"Failed to load user-defined module: {line}") from e
+        logger.info(f"Loaded {import_count} user-defined registry modules.")
+
+
+def _register_dependencies(cls_function):
+    """Decorator to ensure core dependencies are added to the Registry."""
+
+    @functools.wraps(cls_function)
+    def wrapper(self, *args, **kwargs):
+        if not self._initialized:
+            # Immediately set the initialized flag to avoid infinite recursion.
+            self._initialized = True
+            # Import all core dependencies.
+            import oumi.core.analyze  # noqa: F401
+            import oumi.datasets  # noqa: F401
+            import oumi.launcher  # noqa: F401
+            import oumi.models  # noqa: F401
+
+            # Import user-defined dependencies.
+            user_req_file = os.environ.get("OUMI_EXTRA_DEPS_FILE", None)
+            if user_req_file:
+                _load_user_requirements(user_req_file)
+
+        return cls_function(self, *args, **kwargs)
+
+    return wrapper
+
+
 class Registry:
+    _initialized: bool = False
+
     def __init__(self):
         """Initializes the class Registry."""
         self._registry = dict()
@@ -34,14 +118,17 @@ class Registry:
     #
     # Public functions
     #
+    @_register_dependencies
     def contains(self, name: str, type: RegistryType) -> bool:
         """Indicates whether a record exists in the registry."""
         return self._contains(RegistryKey(name, type))
 
+    @_register_dependencies
     def clear(self) -> None:
         """Clears the registry."""
         self._registry = dict()
 
+    @_register_dependencies
     def register(self, name: str, type: RegistryType, value: Any) -> None:
         """Registers a new record."""
         registry_key = RegistryKey(name, type)
@@ -51,8 +138,15 @@ class Registry:
                 f"Registry: `{name}` of `{type}` "
                 f"is already registered as `{current_value}`."
             )
+        if type in (
+            RegistryType.METRICS_FUNCTION,
+            RegistryType.REWARD_FUNCTION,
+        ) and not callable(value):
+            raise ValueError(f"Registry: `{name}` of `{type}` must be callable.")
+
         self._registry[registry_key] = value
 
+    @_register_dependencies
     def get(
         self,
         name: str,
@@ -62,6 +156,7 @@ class Registry:
         registry_key = RegistryKey(name, type)
         return self._registry.get(registry_key)
 
+    @_register_dependencies
     def get_all(self, type: RegistryType) -> dict:
         """Gets all records of a specific type."""
         return {
@@ -85,9 +180,21 @@ class Registry:
         """Gets a record that corresponds to a registered metrics function."""
         return self.get(name, RegistryType.METRICS_FUNCTION)
 
+    def get_reward_function(self, name: str) -> Optional[Callable]:
+        """Gets a record that corresponds to a registered rewards function."""
+        return self.get(name, RegistryType.REWARD_FUNCTION)
+
     def get_judge_config(self, name: str) -> Optional[Callable]:
         """Gets a record that corresponds to a registered judge config."""
         return self.get(name, RegistryType.JUDGE_CONFIG)
+
+    def get_evaluation_function(self, name: str) -> Optional[Callable]:
+        """Gets a record that corresponds to a registered evaluation function."""
+        return self.get(name, RegistryType.EVALUATION_FUNCTION)
+
+    def get_sample_analyzer(self, name: str) -> Optional[Callable]:
+        """Gets a record that corresponds to a registered sample analyzer."""
+        return self.get(name, RegistryType.SAMPLE_ANALYZER)
 
     def get_dataset(
         self, name: str, subset: Optional[str] = None
@@ -198,29 +305,51 @@ def register_cloud_builder(registry_name: str) -> Callable:
     return decorator_register
 
 
-def register_judge(registry_name: str) -> Callable:
-    """Returns a function to register a judge configuration in the Oumi global registry.
-
-    This decorator is used to register judge configuration in the global registry.
-    A judge configuration function typically returns a JudgeConfig object that defines
-    the parameters and attributes for a specific judge.
+def register_evaluation_function(registry_name: str) -> Callable:
+    """Returns function to register an evaluation function in the Oumi global registry.
 
     Args:
-        registry_name (str): The name under which the judge configuration should be
-            registered.
+        registry_name: The name that the evaluation function should be registered with.
 
     Returns:
-        Callable: A decorator function that registers the target judge configuration.
+        Decorator function to register the target evaluation function.
+    """
 
-    Example:
-        @register_judge("my_custom_judge")
-        def my_judge_config() -> JudgeConfig:
-            return JudgeConfig(...)
+    def check_evaluation_function_signature(evaluation_fn):
+        if not callable(evaluation_fn):
+            raise TypeError(
+                f"Registry `{registry_name}` does not correspond to a callable object. "
+                "It is required that registered evaluation functions of type "
+                f"`{RegistryType.EVALUATION_FUNCTION}` must be callable."
+            )
+
+    def decorator_register(obj):
+        """Decorator to register its target `obj`."""
+        check_evaluation_function_signature(obj)
+
+        REGISTRY.register(
+            name=registry_name, type=RegistryType.EVALUATION_FUNCTION, value=obj
+        )
+        return obj
+
+    return decorator_register
+
+
+def register_sample_analyzer(registry_name: str) -> Callable:
+    """Returns function to register a sample analyzer in the Oumi global registry.
+
+    Args:
+        registry_name: The name that the sample analyzer should be registered with.
+
+    Returns:
+        Decorator function to register the target sample analyzer.
     """
 
     def decorator_register(obj):
-        """Decorator to register its target builder."""
-        REGISTRY.register(name=registry_name, type=RegistryType.JUDGE_CONFIG, value=obj)
+        """Decorator to register its target `obj`."""
+        REGISTRY.register(
+            name=registry_name, type=RegistryType.SAMPLE_ANALYZER, value=obj
+        )
         return obj
 
     return decorator_register

@@ -1,10 +1,25 @@
+# Copyright 2025 - Oumi
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import warnings
 from pathlib import Path
-from typing import cast
+from typing import Optional, cast
 
 from tqdm.auto import tqdm
 from typing_extensions import override
 
-from oumi.core.configs import InferenceConfig, ModelParams
+from oumi.core.configs import GenerationParams, InferenceConfig, ModelParams
 from oumi.core.inference import BaseInferenceEngine
 from oumi.core.types.conversation import Conversation, Message, Role
 from oumi.utils.logging import logger
@@ -28,6 +43,7 @@ class LlamaCppInferenceEngine(BaseInferenceEngine):
 
     Example:
         >>> from oumi.core.configs import ModelParams
+        >>> from oumi.inference import LlamaCppInferenceEngine
         >>> model_params = ModelParams(
         ...     model_name="path/to/model.gguf",
         ...     model_kwargs={
@@ -36,13 +52,15 @@ class LlamaCppInferenceEngine(BaseInferenceEngine):
         ...         "flash_attn": True
         ...     }
         ... )
-        >>> engine = LlamaCppInferenceEngine(model_params)
+        >>> engine = LlamaCppInferenceEngine(model_params) # doctest: +SKIP
         >>> # Use the engine for inference
     """
 
     def __init__(
         self,
         model_params: ModelParams,
+        *,
+        generation_params: Optional[GenerationParams] = None,
     ):
         """Initializes the LlamaCppInferenceEngine.
 
@@ -55,6 +73,7 @@ class LlamaCppInferenceEngine(BaseInferenceEngine):
             model_params (ModelParams): Parameters for the model, including the model
                 name, maximum length, and any additional keyword arguments for model
                 initialization.
+            generation_params (GenerationParams): Parameters for generation.
 
         Raises:
             RuntimeError: If the llama-cpp-python package is not installed.
@@ -67,9 +86,13 @@ class LlamaCppInferenceEngine(BaseInferenceEngine):
             - n_threads: 4
             - filename: "*q8_0.gguf" (applies Q8 quantization by default)
             - flash_attn: True
+            - use_mmap: True (loads model parts as needed)
+            - use_mlock: True (locks the model pages in physical RAM)
             These defaults can be overridden by specifying them in
             `model_params.model_kwargs`.
         """
+        super().__init__(model_params=model_params, generation_params=generation_params)
+
         if not Llama:
             raise RuntimeError(
                 "llama-cpp-python is not installed. "
@@ -101,6 +124,9 @@ class LlamaCppInferenceEngine(BaseInferenceEngine):
             # Use Q8 quantization by default.
             "filename": "*8_0.gguf",
             "flash_attn": True,
+            # Memory safety defaults
+            "use_mmap": True,
+            "use_mlock": True,
         }
 
         model_kwargs = model_params.model_kwargs.copy()
@@ -125,16 +151,24 @@ class LlamaCppInferenceEngine(BaseInferenceEngine):
         self, conversation: Conversation
     ) -> list[dict[str, str]]:
         """Converts a conversation to a list of llama.cpp input messages."""
+        # FIXME Handle multimodal e.g., raise an error.
+        role_mapping = {
+            Role.SYSTEM: "system",
+            Role.USER: "user",
+            Role.ASSISTANT: "assistant",
+        }
         return [
             {
-                "content": message.content or "",
-                "role": "user" if message.role == Role.USER else "assistant",
+                "content": message.compute_flattened_text_content(),
+                "role": role_mapping.get(message.role, "assistant"),
             }
             for message in conversation.messages
         ]
 
     def _infer(
-        self, input: list[Conversation], inference_config: InferenceConfig
+        self,
+        input: list[Conversation],
+        inference_config: Optional[InferenceConfig] = None,
     ) -> list[Conversation]:
         """Runs model inference on the provided input using llama.cpp.
 
@@ -148,7 +182,11 @@ class LlamaCppInferenceEngine(BaseInferenceEngine):
             appended. Each conversation in the output list corresponds to an input
             conversation, with an additional message from the assistant (model) added.
         """
-        generation_params = inference_config.generation
+        generation_params = (
+            inference_config.generation
+            if inference_config and inference_config.generation
+            else self._generation_params
+        )
         output_conversations = []
 
         # skip using a progress for single turns
@@ -191,11 +229,11 @@ class LlamaCppInferenceEngine(BaseInferenceEngine):
                 conversation_id=conversation.conversation_id,
             )
             output_conversations.append(new_conversation)
-            if inference_config.output_path:
-                self._save_conversation(
-                    new_conversation,
-                    inference_config.output_path,
-                )
+            self._save_conversation_to_scratch(
+                new_conversation,
+                inference_config.output_path if inference_config else None,
+            )
+
         return output_conversations
 
     @override
@@ -212,9 +250,10 @@ class LlamaCppInferenceEngine(BaseInferenceEngine):
             "top_p",
         }
 
-    @override
     def infer_online(
-        self, input: list[Conversation], inference_config: InferenceConfig
+        self,
+        input: list[Conversation],
+        inference_config: Optional[InferenceConfig] = None,
     ) -> list[Conversation]:
         """Runs model inference online.
 
@@ -225,11 +264,20 @@ class LlamaCppInferenceEngine(BaseInferenceEngine):
         Returns:
             List[Conversation]: Inference output.
         """
-        return self._infer(input, inference_config)
+        warnings.warn(
+            "infer_online() will be private in the future. Use infer() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        results = self._infer_online(input, inference_config)
+        if inference_config and inference_config.output_path:
+            self._save_conversations(results, inference_config.output_path)
+        return results
 
-    @override
     def infer_from_file(
-        self, input_filepath: str, inference_config: InferenceConfig
+        self,
+        input_filepath: str,
+        inference_config: Optional[InferenceConfig] = None,
     ) -> list[Conversation]:
         """Runs model inference on inputs in the provided file.
 
@@ -243,5 +291,30 @@ class LlamaCppInferenceEngine(BaseInferenceEngine):
         Returns:
             List[Conversation]: Inference output.
         """
+        warnings.warn(
+            "infer_from_file() will be private in the future. Use infer() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         input = self._read_conversations(input_filepath)
+        results = self._infer(input, inference_config)
+        if inference_config and inference_config.output_path:
+            self._save_conversations(results, inference_config.output_path)
+        return results
+
+    @override
+    def _infer_online(
+        self,
+        input: list[Conversation],
+        inference_config: Optional[InferenceConfig] = None,
+    ) -> list[Conversation]:
+        """Runs model inference online.
+
+        Args:
+            input: A list of conversations to run inference on.
+            inference_config: Parameters for inference.
+
+        Returns:
+            List[Conversation]: Inference output.
+        """
         return self._infer(input, inference_config)

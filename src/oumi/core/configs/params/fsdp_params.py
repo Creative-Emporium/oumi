@@ -1,3 +1,17 @@
+# Copyright 2025 - Oumi
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
@@ -193,10 +207,17 @@ class FSDPParams(BaseParams):
     forward_prefetch: bool = False
     """If True, prefetches the forward pass results."""
 
+    use_orig_params: Optional[bool] = None
+    """If True, uses the PyTorch Module's original parameters for FSDP.
+
+    For more information, see: https://pytorch.org/docs/stable/fsdp.html.
+    If not specified, it will be automatically inferred based on other config values.
+    """
+
     state_dict_type: StateDictType = StateDictType.FULL_STATE_DICT
     """Specifies the type of state dict to use for checkpointing."""
 
-    auto_wrap_policy: AutoWrapPolicy = AutoWrapPolicy.SIZE_BASED_WRAP
+    auto_wrap_policy: AutoWrapPolicy = AutoWrapPolicy.NO_WRAP
     """Policy for automatically wrapping layers in FSDP."""
 
     min_num_params: int = 100_000

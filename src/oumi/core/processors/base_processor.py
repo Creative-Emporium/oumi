@@ -1,6 +1,20 @@
+# Copyright 2025 - Oumi
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import abc
 from pathlib import Path
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 import PIL.Image
 import transformers
@@ -18,6 +32,12 @@ class BaseProcessor(abc.ABC):
     The high-level purpose of a processor is to generate model-specific input features
     from input data such as text, images, conversations, etc.
     """
+
+    @property
+    @abc.abstractmethod
+    def processor_name(self) -> str:
+        """Returns a processor name."""
+        raise NotImplementedError
 
     @property
     @abc.abstractmethod
@@ -61,22 +81,45 @@ class BaseProcessor(abc.ABC):
         """Returns an image token id."""
         raise NotImplementedError
 
+    @property
+    @abc.abstractmethod
+    def label_ignore_index(self) -> Optional[int]:
+        """Returns a label ignore index."""
+        raise NotImplementedError
+
+    @property
+    @abc.abstractmethod
+    def ignore_features(self) -> list[str]:
+        """Returns a list of keys of features to ignore from feeding the model."""
+        raise NotImplementedError
+
+    @property
+    @abc.abstractmethod
+    def raw_processor(self) -> Callable:
+        """Returns the underlying raw processor.
+
+        The use of this method is generally discouraged. Only use it if you know
+        what you are doing e.g., direct access to the underlying processor
+        is required by some third-party library.
+        """
+        raise NotImplementedError
+
     @abc.abstractmethod
     def __call__(
         self,
         *,
         text: list[str],
-        padding: bool,
         images: Optional[list[PIL.Image.Image]] = None,
         return_tensors: Optional[str] = "pt",
+        **kwargs,
     ) -> transformers.BatchEncoding:
         """Invokes the processor to extract features.
 
         Args:
             text: A list of text prompts.
-            padding: Whether to pad sequences to common length.
             images: A list of input images.
             return_tensors: The format of returned tensors.
+            kwargs: Additional keyword arguments.
 
         Returns:
             transformers.BatchEncoding: The model-specific input features.
@@ -101,4 +144,24 @@ class BaseProcessor(abc.ABC):
     @abc.abstractmethod
     def save_config(self, output_dir: Union[Path, str]) -> None:
         """Saves processor config to the directory."""
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def truncate_text(
+        self,
+        text: str,
+        *,
+        max_tokens: int,
+        truncation_side: str = "right",
+    ) -> tuple[str, int]:
+        """Truncates text to `max_length` in tokens.
+
+        Args:
+            text: A text prompt.
+            max_tokens: Maximum number of tokens to keep.
+            truncation_side: The side to truncate the tokens ("right" or "left").
+
+        Returns:
+            A tuple containing truncated text prompt and the number of tokens.
+        """
         raise NotImplementedError

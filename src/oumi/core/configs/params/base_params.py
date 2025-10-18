@@ -1,3 +1,17 @@
+# Copyright 2025 - Oumi
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import dataclasses
 from collections.abc import Iterator
 from typing import Any, Optional
@@ -8,21 +22,22 @@ class BaseParams:
     """Base class for all parameter classes.
 
     This class provides a common interface for all parameter classes,
-    and provides a `validate` method to recursively validate the parameters.
+    and provides a `finalize_and_validate` method to recursively validate the
+    parameters.
 
-    Subclasses should implement the `__validate__` method to perform
+    Subclasses should implement the `__finalize_and_validate__` method to perform
     custom validation logic.
     """
 
     #
     # Public methods
     #
-    def validate(self) -> None:
-        """Recursively validates the parameters."""
-        self._validate(set())
+    def finalize_and_validate(self) -> None:
+        """Recursively finalizes and validates the parameters."""
+        self._finalize_and_validate(set())
 
-    def __validate__(self) -> None:
-        """Validates the parameters of this object.
+    def __finalize_and_validate__(self) -> None:
+        """Finalizes and validates the parameters of this object.
 
         This method can be overridden by subclasses to implement custom
         validation logic.
@@ -43,8 +58,8 @@ class BaseParams:
     #
     # Private methods
     #
-    def _validate(self, validated: Optional[set[int]]) -> None:
-        """Recursively validates the parameters."""
+    def _finalize_and_validate(self, validated: Optional[set[int]]) -> None:
+        """Recursively finalizes and validates the parameters."""
         if validated is None:
             validated = set()
 
@@ -53,20 +68,20 @@ class BaseParams:
             return
         validated.add(id(self))
 
-        # Validate the children of this object.
+        # Finalize and validate the children of this object.
         # Note that we only support one level of nesting.
         # For example: `List[BaseParams]` is supported, but not `List[List[BaseParams]]`
         for _, attr_value in self:
             if isinstance(attr_value, BaseParams):
-                attr_value._validate(validated)
+                attr_value._finalize_and_validate(validated)
             elif isinstance(attr_value, list):
                 for item in attr_value:
                     if isinstance(item, BaseParams):
-                        item._validate(validated)
+                        item._finalize_and_validate(validated)
             elif isinstance(attr_value, dict):
                 for item in attr_value.values():
                     if isinstance(item, BaseParams):
-                        item._validate(validated)
+                        item._finalize_and_validate(validated)
 
         # Validate this object itself
-        self.__validate__()
+        self.__finalize_and_validate__()

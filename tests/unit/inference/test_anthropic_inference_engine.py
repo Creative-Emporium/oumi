@@ -3,7 +3,7 @@ from unittest.mock import patch
 import pytest
 
 from oumi.core.configs import GenerationParams, ModelParams, RemoteParams
-from oumi.core.types.conversation import Conversation, Message, Role, Type
+from oumi.core.types.conversation import Conversation, Message, Role
 from oumi.inference.anthropic_inference_engine import AnthropicInferenceEngine
 
 
@@ -26,7 +26,7 @@ def test_convert_conversation_to_api_input(anthropic_engine):
     generation_params = GenerationParams(max_new_tokens=100)
 
     result = anthropic_engine._convert_conversation_to_api_input(
-        conversation, generation_params
+        conversation, generation_params, anthropic_engine._model_params
     )
 
     assert result["model"] == "claude-3"
@@ -57,7 +57,6 @@ def test_convert_api_output_to_conversation(anthropic_engine):
     assert result.messages[0].content == "User message"
     assert result.messages[1].content == "Assistant response"
     assert result.messages[1].role == Role.ASSISTANT
-    assert result.messages[1].type == Type.TEXT
     assert result.metadata == {"key": "value"}
     assert result.conversation_id == "test_id"
 
@@ -75,3 +74,11 @@ def test_get_request_headers(anthropic_engine):
     assert result["Content-Type"] == "application/json"
     assert result["anthropic-version"] == AnthropicInferenceEngine.anthropic_version
     assert result["X-API-Key"] == "test_api_key"
+
+
+def test_remote_params_defaults():
+    anthropic_engine = AnthropicInferenceEngine(
+        model_params=ModelParams(model_name="some_model"),
+    )
+    assert anthropic_engine._remote_params.num_workers == 5
+    assert anthropic_engine._remote_params.politeness_policy == 60.0

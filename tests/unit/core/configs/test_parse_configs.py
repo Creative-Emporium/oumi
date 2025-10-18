@@ -9,6 +9,9 @@ from oumi.core.configs import (
     EvaluationConfig,
     InferenceConfig,
     JobConfig,
+    JudgeConfig,
+    QuantizationConfig,
+    SynthesisConfig,
     TrainingConfig,
 )
 from oumi.core.types import HardwareException
@@ -43,11 +46,8 @@ def _get_all_config_paths(exclude_yaml_suffixes: Optional[set[str]]) -> list[str
 @pytest.mark.parametrize(
     "config_path",
     _get_all_config_paths(
-        {
+        exclude_yaml_suffixes={
             "accelerate.yaml",
-            "sky_job.yaml",
-            "sky_ssh_job.yaml",
-            "oumi_dev_iam_custom_role.yaml",
         }
     ),
 )
@@ -57,6 +57,9 @@ def test_parse_configs(config_path: str):
         EvaluationConfig,
         InferenceConfig,
         JobConfig,
+        JudgeConfig,
+        QuantizationConfig,
+        SynthesisConfig,
         TrainingConfig,
     ]
     error_messages = []
@@ -77,9 +80,6 @@ def test_parse_configs(config_path: str):
     _get_all_config_paths(
         {
             "accelerate.yaml",
-            "sky_job.yaml",
-            "sky_ssh_job.yaml",
-            "oumi_dev_iam_custom_role.yaml",
         }
     ),
 )
@@ -89,6 +89,9 @@ def test_parse_configs_from_yaml_and_arg_list(config_path: str):
         EvaluationConfig,
         InferenceConfig,
         JobConfig,
+        JudgeConfig,
+        QuantizationConfig,
+        SynthesisConfig,
         TrainingConfig,
     ]
     error_messages = []

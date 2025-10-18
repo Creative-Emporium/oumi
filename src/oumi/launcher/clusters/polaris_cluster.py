@@ -1,3 +1,18 @@
+# Copyright 2025 - Oumi
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import io
 import re
 import uuid
 from datetime import datetime
@@ -94,7 +109,7 @@ def _create_job_script(job: JobConfig) -> str:
     # Always start the script with #!/bin/bash.
     script_prefix = "#!/bin/bash"
     if len(output_lines) > 0:
-        if not output_lines[0].startswith("script_prefix"):
+        if not output_lines[0].startswith(script_prefix):
             output_lines.insert(0, script_prefix)
     # Join each line. Always end the script with a new line.
     return "\n".join(output_lines) + "\n"
@@ -108,8 +123,6 @@ def _validate_job_config(job: JobConfig) -> None:
     """
     if not job.user:
         raise ValueError("User must be provided for Polaris jobs.")
-    if not job.working_dir:
-        raise ValueError("Working directory must be provided for Polaris jobs.")
     if not job.run:
         raise ValueError("Run script must be provided for Polaris jobs.")
     if job.num_nodes < 1:
@@ -120,6 +133,8 @@ def _validate_job_config(job: JobConfig) -> None:
             f"Unsupported cloud: {job.resources.cloud}"
         )
     # Warn that other resource parameters are unused for Polaris.
+    if not job.working_dir:
+        logger.warning("Working directory is not set. This is not recommended.")
     if job.resources.region:
         logger.warning("Region is unused for Polaris jobs.")
     if job.resources.zone:
@@ -207,9 +222,10 @@ class PolarisCluster(BaseCluster):
         """Runs the specified job on this cluster.
 
         For Polaris this method consists of 5 parts:
-        1. Copy the working directory to /home/$USER/oumi_launcher/$JOB_NAME.
+
+        1. Copy the working directory to /home/$USER/oumi_launcher/<submission_time>.
         2. Check if there is a conda installation at /home/$USER/miniconda3/envs/oumi.
-            If not, install it.
+           If not, install it.
         3. Copy all file mounts.
         4. Create a job script with all env vars, setup, and run commands.
         5. CD into the working directory and submit the job.
@@ -218,7 +234,7 @@ class PolarisCluster(BaseCluster):
             job: The job to run.
 
         Returns:
-            The job status.
+            JobStatus: The job status.
         """
         _validate_job_config(job)
         job_name = job.name or uuid.uuid1().hex
@@ -226,7 +242,10 @@ class PolarisCluster(BaseCluster):
         submission_time = _format_date(datetime.now())
         remote_working_dir = Path(f"/home/{user}/oumi_launcher/{submission_time}")
         # Copy the working directory to Polaris /home/ system.
-        self._client.put_recursive(job.working_dir, str(remote_working_dir))
+        if job.working_dir:
+            self._client.put_recursive(job.working_dir, str(remote_working_dir))
+        else:
+            self._client.run_commands([f"mkdir -p {remote_working_dir}"])
         # Check if Oumi is installed in a conda env. If not, install it.
         oumi_env_path = Path("/home/$USER/miniconda3/envs/oumi")
         install_cmds = [
@@ -242,7 +261,7 @@ class PolarisCluster(BaseCluster):
             "if ! command -v uv >/dev/null 2>&1; then",
             "pip install -U uv",
             "fi",
-            "pip install -e '.[gpu,quant]'",  # TODO Re-enable uv OPE-670
+            "pip install -e '.[gpu]'",  # TODO Re-enable uv OPE-670
         ]
         self._client.run_commands(install_cmds)
         # Copy all file mounts.
@@ -279,3 +298,14 @@ class PolarisCluster(BaseCluster):
     def down(self) -> None:
         """This is a no-op for Polaris clusters."""
         pass
+
+    def get_logs_stream(
+        self, cluster_name: str, job_id: Optional[str] = None
+    ) -> io.TextIOBase:
+        """Gets a stream that tails the logs of the target job.
+
+        Args:
+            cluster_name: The name of the cluster the job was run in.
+            job_id: The ID of the job to tail the logs of.
+        """
+        raise NotImplementedError

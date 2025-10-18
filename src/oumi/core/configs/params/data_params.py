@@ -1,7 +1,21 @@
+# Copyright 2025 - Oumi
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from enum import Enum
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, Union
 
 from omegaconf import MISSING
 
@@ -111,6 +125,20 @@ class DatasetParams(BaseParams):
     trust_remote_code: bool = False
     """Whether to trust remote code when loading the dataset."""
 
+    transform_num_workers: Optional[Union[str, int]] = None
+    """Number of subprocesses to use for dataset post-processing (`ds.transform()`).
+
+    Multiprocessing is disabled by default (`None`).
+
+    You can also use the special value "auto" to let oumi automatically
+    select the number of subprocesses.
+
+    Using multiple processes can speed-up processing
+    e.g., for large or multi-modal datasets.
+
+    The parameter is only supported for Map (non-iterable) datasets.
+    """
+
     def __post_init__(self):
         """Verifies params."""
         if self.sample_count is not None:
@@ -122,14 +150,37 @@ class DatasetParams(BaseParams):
             if self.mixture_proportion > 1:
                 raise ValueError("`mixture_proportion` must not be greater than 1.0 .")
 
+        if self.transform_num_workers is not None:
+            if isinstance(self.transform_num_workers, str):
+                if not (self.transform_num_workers == "auto"):
+                    raise ValueError(
+                        "Unknown value of transform_num_workers: "
+                        f"{self.transform_num_workers}. Must be 'auto' if string."
+                    )
+            elif (not isinstance(self.transform_num_workers, int)) or (
+                self.transform_num_workers <= 0
+            ):
+                raise ValueError(
+                    "Non-positive value of transform_num_workers: "
+                    f"{self.transform_num_workers}."
+                )
+
+        if len(self.dataset_kwargs) > 0:
+            conflicting_keys = {f.name for f in fields(self)}.intersection(
+                self.dataset_kwargs.keys()
+            )
+            if len(conflicting_keys) > 0:
+                raise ValueError(
+                    "dataset_kwargs attempts to override the following "
+                    f"reserved fields: {conflicting_keys}. "
+                    "Use properties of DatasetParams instead."
+                )
+
 
 @dataclass
 class DatasetSplitParams(BaseParams):
     datasets: list[DatasetParams] = field(default_factory=list)
-    """The input datasets used for training.
-
-    This will later be split into train, test, and validation.
-    """
+    """The datasets in this split."""
 
     collator_name: Optional[str] = None
     """Name of Oumi data collator.
@@ -146,13 +197,19 @@ class DatasetSplitParams(BaseParams):
     If None, then a default collator will be assigned.
     """
 
+    collator_kwargs: dict[str, Any] = field(default_factory=dict)
+    """Additional keyword arguments to pass to the collator constructor.
+
+    These arguments will be passed directly to the collator constructor
+    and can be used to customize collator behavior beyond the default parameters.
+    """
+
     pack: bool = False
     """Whether to pack the text into constant-length chunks.
 
     Each chunk will be the size of the model's max input length.
     This will stream the dataset, and tokenize on the fly
     if the dataset isn't already tokenized (i.e. has an `input_ids` column).
-    Requires `stream` to be set to True.
     """
 
     stream: bool = False
@@ -161,8 +218,8 @@ class DatasetSplitParams(BaseParams):
     target_col: Optional[str] = None
     """The dataset column name containing the input for training/testing/validation.
 
-    Required for SFTTrainer. If specified, all datasets in this split must contain a
-    column with this name.
+    Deprecated:
+        This parameter is deprecated and will be removed in the future.
     """
 
     mixture_strategy: str = field(
@@ -195,44 +252,14 @@ class DatasetSplitParams(BaseParams):
     If set to `None` mixing will be non-deterministic.
     """
 
-    use_async_dataset: bool = False
-    """Whether to use the PretrainingAsyncTextDataset instead of ConstantLengthDataset.
+    use_torchdata: Optional[bool] = None
+    """Whether to use the `torchdata` library for dataset loading and processing.
+
+    If set to `None`, this setting may be auto-inferred.
     """
-
-    # EXPERIMENTAL PARAMS -------------------------
-    experimental_use_torch_datapipes: bool = False
-    """Whether to use the torch DataPipes for dataset processing.
-
-    Warning:
-        This is an experimental feature and may change without notice.
-    """
-
-    # END EXPERIMENTAL PARAMS --------------------
 
     def __post_init__(self):
         """Verifies params."""
-        if self.pack:
-            # TODO: why is this check necessary?
-            if not self.stream:
-                raise ValueError("`stream` must be enabled if `pack` is enabled.")
-            if not self.target_col:
-                raise ValueError("`target_col` must be specified if `pack` is enabled.")
-        if any([dataset.mixture_proportion is not None for dataset in self.datasets]):
-            if not all(
-                [dataset.mixture_proportion is not None for dataset in self.datasets]
-            ):
-                raise ValueError(
-                    "If `mixture_proportion` is specified it must be "
-                    " specified for all datasets"
-                )
-            mix_sum = sum(
-                filter(None, [dataset.mixture_proportion for dataset in self.datasets])
-            )
-            if not self._is_sum_normalized(mix_sum):
-                raise ValueError(
-                    "The sum of `mixture_proportion` must be 1.0. "
-                    f"The current sum is {mix_sum} ."
-                )
         if any([dataset.mixture_proportion is not None for dataset in self.datasets]):
             if not all(
                 [dataset.mixture_proportion is not None for dataset in self.datasets]
@@ -271,7 +298,7 @@ class DataParams(BaseParams):
     """The input datasets used for training."""
 
     test: DatasetSplitParams = field(default_factory=DatasetSplitParams)
-    """The input datasets used for testing."""
+    """The input datasets used for testing. This field is currently unused."""
 
     validation: DatasetSplitParams = field(default_factory=DatasetSplitParams)
     """The input datasets used for validation."""
@@ -287,8 +314,11 @@ class DataParams(BaseParams):
         else:
             raise ValueError(f"Received invalid split: {split}.")
 
-    def __post_init__(self):
+    def __finalize_and_validate__(self):
         """Verifies params."""
+        if len(self.train.datasets) == 0:
+            raise ValueError("At least one training dataset is required.")
+
         all_collators = set()
         if self.train.collator_name:
             all_collators.add(self.train.collator_name)

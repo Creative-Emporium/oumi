@@ -20,6 +20,7 @@ from oumi.inference import (
     NativeTextInferenceEngine,
     RemoteInferenceEngine,
     RemoteVLLMInferenceEngine,
+    SambanovaInferenceEngine,
     SGLangInferenceEngine,
     VLLMInferenceEngine,
 )
@@ -32,6 +33,7 @@ SUPPORTED_INFERENCE_ENGINES = [
     AnthropicInferenceEngine,
     LlamaCppInferenceEngine,
     NativeTextInferenceEngine,
+    SambanovaInferenceEngine,
     SGLangInferenceEngine,
     VLLMInferenceEngine,
     RemoteVLLMInferenceEngine,
@@ -50,7 +52,12 @@ def sample_conversation():
 
 @pytest.fixture
 def model_params():
-    return ModelParams(model_name="gpt2", tokenizer_pad_token="<|endoftext|>")
+    return ModelParams(
+        model_name="openai-community/gpt2",
+        tokenizer_pad_token="<|endoftext|>",
+        tokenizer_name="gpt2",
+        load_pretrained_weights=False,
+    )
 
 
 @pytest.fixture
@@ -67,12 +74,46 @@ def _should_skip_engine(engine_class) -> bool:
 
 def _mock_engine(engine_class):
     """Mock the engine to avoid loading non-existent models."""
+
+    mock_tokenizer = mock.MagicMock()
+    mock_tokenizer.pad_token_id = 0
+    mock_tokenizer.eos_token_id = 0
+    mock_tokenizer.eos_token = "<eos>"
+    mock_tokenizer.batch_decode = mock.MagicMock()
+    mock_tokenizer.batch_decode.return_value = ["I'm fine, how are you?"]
+    mock_tokenizer.apply_chat_template = mock.MagicMock()
+    mock_tokenizer.apply_chat_template.return_value = (
+        "<|startoftext|>I'm fine, how are you? <|endoftext|>"
+    )
+    mock_model = mock.MagicMock()
+    mock_model.generate = mock.MagicMock()  # Add generate attribute
+
     if engine_class == VLLMInferenceEngine:
-        mock_ctx = patch("vllm.LLM")
+        mock_llm = mock.MagicMock()
+        mock_ctx = patch.multiple(
+            "oumi.inference.vllm_inference_engine",
+            vllm=mock.MagicMock(LLM=mock.MagicMock(return_value=mock_llm)),
+            build_tokenizer=mock.MagicMock(return_value=mock_tokenizer),
+        )
     elif engine_class == LlamaCppInferenceEngine:
         mock_ctx = patch("llama_cpp.Llama.from_pretrained")
-    # elif issubclass(engine_class, RemoteInferenceEngine):
-    #     mock_ctx = patch("aiohttp.ClientSession")
+    elif engine_class == SGLangInferenceEngine:
+        mock_ctx = patch.multiple(
+            "oumi.inference.sglang_inference_engine",
+            build_tokenizer=mock.MagicMock(return_value=mock_tokenizer),
+            build_processor=mock.MagicMock(return_value=None),
+            is_image_text_llm=mock.MagicMock(return_value=False),
+        )
+    elif engine_class == NativeTextInferenceEngine:
+        mock_ctx = patch.multiple(
+            "oumi.inference.native_text_inference_engine",
+            build_model=mock.MagicMock(return_value=mock_model),
+            build_tokenizer=mock.MagicMock(return_value=mock_tokenizer),
+            build_processor=mock.MagicMock(return_value=None),
+            is_image_text_llm=mock.MagicMock(return_value=False),
+        )
+    elif issubclass(engine_class, RemoteInferenceEngine):
+        mock_ctx = patch("aiohttp.ClientSession")
     else:
         mock_ctx = contextlib.nullcontext()
 
@@ -115,7 +156,9 @@ def test_generation_params_used_in_inference(
     ):
         remote_params = RemoteParams(api_url="<placeholder>")
         if issubclass(engine_class, RemoteInferenceEngine):
-            engine = engine_class(model_params, remote_params)
+            engine = engine_class(
+                model_params=model_params, remote_params=remote_params
+            )
         else:
             engine = engine_class(model_params)
 
@@ -136,7 +179,7 @@ def test_generation_params_used_in_inference(
             remote_params=remote_params,
         )
 
-        result = engine.infer_online([sample_conversation], inference_config)
+        result = engine.infer([sample_conversation], inference_config)
 
         # Check that the result is as expected
         assert result == [sample_conversation]
@@ -175,7 +218,9 @@ def test_generation_params_defaults_used_in_inference(
     ):
         remote_params = RemoteParams(api_url="<placeholder>")
         if issubclass(engine_class, RemoteInferenceEngine):
-            engine = engine_class(model_params, remote_params)
+            engine = engine_class(
+                model_params=model_params, remote_params=remote_params
+            )
         else:
             engine = engine_class(model_params)
 
@@ -186,13 +231,13 @@ def test_generation_params_defaults_used_in_inference(
             remote_params=remote_params,
         )
 
-        result = engine.infer_online([sample_conversation], inference_config)
+        result = engine.infer([sample_conversation], inference_config)
 
         assert result == [sample_conversation]
 
         mock_infer.assert_called_once()
         called_params = mock_infer.call_args[0][1].generation
-        assert called_params.max_new_tokens == 256
+        assert called_params.max_new_tokens == 1024
         assert called_params.temperature == 0.0
         assert called_params.top_p == 1.0
         assert called_params.frequency_penalty == 0.0
@@ -209,12 +254,17 @@ def test_generation_params_defaults_used_in_inference(
 def test_supported_params_exist_in_config(
     engine_class, model_params, generation_params_fields
 ):
+    if _should_skip_engine(engine_class):
+        pytest.skip(f"{engine_class.__name__} is not available")
+
     mock_ctx = _mock_engine(engine_class)
 
     with mock_ctx:
         remote_params = RemoteParams(api_url="<placeholder>")
         if issubclass(engine_class, RemoteInferenceEngine):
-            engine = engine_class(model_params, remote_params)
+            engine = engine_class(
+                model_params=model_params, remote_params=remote_params
+            )
         else:
             engine = engine_class(model_params)
 
@@ -243,6 +293,9 @@ def test_supported_params_exist_in_config(
 def test_unsupported_params_warning(
     engine_class, unsupported_param, value, model_params, sample_conversation, caplog
 ):
+    if _should_skip_engine(engine_class):
+        pytest.skip(f"{engine_class.__name__} is not available")
+
     mock_ctx = _mock_engine(engine_class)
 
     with (
@@ -251,7 +304,9 @@ def test_unsupported_params_warning(
     ):
         remote_params = RemoteParams(api_url="test")
         if issubclass(engine_class, RemoteInferenceEngine):
-            engine = engine_class(model_params, remote_params)
+            engine = engine_class(
+                model_params=model_params, remote_params=remote_params
+            )
         else:
             engine = engine_class(model_params)
 
@@ -292,6 +347,9 @@ def test_unsupported_params_warning(
 def test_no_warning_for_default_values(
     engine_class, param, default_value, model_params, sample_conversation, caplog
 ):
+    if _should_skip_engine(engine_class):
+        pytest.skip(f"{engine_class.__name__} is not available")
+
     mock_ctx = _mock_engine(engine_class)
 
     with (
@@ -300,7 +358,9 @@ def test_no_warning_for_default_values(
     ):
         remote_params = RemoteParams(api_url="test")
         if issubclass(engine_class, RemoteInferenceEngine):
-            engine = engine_class(model_params, remote_params)
+            engine = engine_class(
+                model_params=model_params, remote_params=remote_params
+            )
         else:
             engine = engine_class(model_params)
 
@@ -332,23 +392,31 @@ def test_no_warning_for_default_values(
 )
 def test_supported_params_are_accessed(engine_class, model_params, sample_conversation):
     """Test that all supported parameters are actually accessed during inference."""
+    if _should_skip_engine(engine_class):
+        pytest.skip(f"{engine_class.__name__} is not available")
+
     mock_ctx = _mock_engine(engine_class)
 
     class AccessTrackingGenerationParams(GenerationParams):
         """A version of GenerationParams that tracks which parameters are accessed."""
 
         _accessed_params: set[str]
+        _track_access: bool
 
         def __init__(self, **kwargs):
             self._accessed_params: set[str] = set()
+            self._track_access = False  # Don't track during initialization
             super().__init__(**kwargs)
+            self._track_access = True  # Start tracking after initialization
 
         def __getattribute__(self, name):
             # No need to track access to private attributes or methods
             if not name.startswith("_"):
                 # Use object.__getattribute__ to avoid infinite recursion
-                accessed_params = object.__getattribute__(self, "_accessed_params")
-                accessed_params.add(name)
+                track_access = object.__getattribute__(self, "_track_access")
+                if track_access:
+                    accessed_params = object.__getattribute__(self, "_accessed_params")
+                    accessed_params.add(name)
             return object.__getattribute__(self, name)
 
         @property
@@ -361,7 +429,9 @@ def test_supported_params_are_accessed(engine_class, model_params, sample_conver
     with mock_ctx, mock.patch.object(engine_class, "_check_unsupported_params"):
         remote_params = RemoteParams(api_url="test")
         if issubclass(engine_class, RemoteInferenceEngine):
-            engine = engine_class(model_params, remote_params)
+            engine = engine_class(
+                model_params=model_params, remote_params=remote_params
+            )
         else:
             engine = engine_class(model_params)
 
@@ -380,7 +450,7 @@ def test_supported_params_are_accessed(engine_class, model_params, sample_conver
             # the conversation to the API input. This should access most of the
             # parameters.
             engine._convert_conversation_to_api_input(
-                sample_conversation, tracked_params
+                sample_conversation, tracked_params, model_params
             )
         elif engine_class == LlamaCppInferenceEngine:
             with patch.object(engine, "_llm") as mock_llm:
@@ -388,6 +458,15 @@ def test_supported_params_are_accessed(engine_class, model_params, sample_conver
                     "choices": [{"message": {"content": "test"}}]
                 }
 
+                engine.infer([sample_conversation], inference_config)
+        elif engine_class == NativeTextInferenceEngine:
+            inference_config.generation.exclude_prompt_from_response = False
+            engine.infer([sample_conversation], inference_config)
+        elif engine_class == VLLMInferenceEngine:
+            with patch.object(engine, "_llm") as mock_vllm:
+                mock_vllm.chat.return_value = [
+                    mock.MagicMock(outputs=[mock.MagicMock(text="Some output")])
+                ]
                 engine.infer([sample_conversation], inference_config)
         else:
             engine.infer([sample_conversation], inference_config)

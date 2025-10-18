@@ -1,14 +1,34 @@
-import functools
-from enum import Enum
+# Copyright 2025 - Oumi
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from pathlib import Path
 from typing import Optional, Union, cast
 
 import torch
 import torch.nn as nn
 import transformers
-from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
+from peft import PeftModel, get_peft_model, prepare_model_for_kbit_training
+from transformers import Mxfp4Config  # pyright: ignore[reportAttributeAccessIssue]
 
 from oumi.core.configs import ModelParams, PeftParams
+from oumi.core.configs.internal.internal_model_config import InternalModelConfig
+from oumi.core.configs.internal.supported_models import (
+    find_internal_model_config_using_model_name,
+    find_model_hf_config,
+    get_all_models_map,
+    is_custom_model,
+)
 from oumi.core.distributed import get_device_rank_info
 from oumi.core.registry import REGISTRY, RegistryType
 from oumi.core.tokenizers import get_default_special_tokens
@@ -16,11 +36,19 @@ from oumi.utils.distributed_utils import is_using_accelerate_fsdp
 from oumi.utils.io_utils import get_oumi_root_directory, load_file
 from oumi.utils.logging import logger
 from oumi.utils.torch_naming_heuristics import disable_dropout
+from oumi.utils.torch_utils import freeze_model_layers
 
 try:
     import liger_kernel.transformers  # type: ignore
 except ImportError:
     liger_kernel = None
+
+# Import `onebitllms` utils methods
+try:
+    import onebitllms  # type: ignore
+    from onebitllms import replace_linear_with_bitnet_linear  # type: ignore
+except ImportError:
+    onebitllms = None
 
 
 def build_model(
@@ -38,7 +66,7 @@ def build_model(
     Returns:
         model: The built model.
     """
-    if REGISTRY.contains(name=model_params.model_name, type=RegistryType.MODEL):
+    if is_custom_model(model_params.model_name):
         model = build_oumi_model(
             model_params=model_params,
             peft_params=peft_params,
@@ -65,14 +93,25 @@ def build_model(
     if model_params.enable_liger_kernel:
         _patch_model_for_liger_kernel(model)
 
-    for layer_name in model_params.freeze_layers:
-        if hasattr(model, layer_name):
-            logger.info(f"Freezing layer '{layer_name}'...")
+    if model_params.model_name in (
+        "tiiuae/Falcon-E-1B-Base",
+        "tiiuae/Falcon-E-1B-Instruct",
+        "tiiuae/Falcon-E-3B-Base",
+        "tiiuae/Falcon-E-3B-Instruct",
+    ):
+        if onebitllms is None:
+            raise ValueError(
+                """Please install `onebitllms` in order to fine-tune
+                `Falcon-E` models - `pip install onebitllms`"""
+            )
+        model = replace_linear_with_bitnet_linear(model)
 
-            for param in getattr(model, layer_name).parameters():
-                param.requires_grad_(False)
-        else:
-            logger.warning(f"Layer '{layer_name}' not found in model.")
+    if len(model_params.freeze_layers) > 0:
+        num_frozen = freeze_model_layers(model, model_params.freeze_layers)
+        logger.warning(
+            f"{num_frozen} layer(s) frozen based on the config: "
+            f"{model_params.freeze_layers}."
+        )
 
     if model_params.compile:
         # The output type of torch.compile is Callable, but when I test it it's of type
@@ -119,13 +158,25 @@ def build_oumi_model(
     model = model_class(**model_params.model_kwargs)
 
     if model_params.load_pretrained_weights:
-        raise NotImplementedError
+        raise NotImplementedError(
+            "Loading pretrained weights for custom Oumi models is not yet implemented. "
+            "Currently, custom models can only be initialized from scratch. "
+            "Please open a feature request at https://github.com/oumi-ai/oumi."
+        )
 
     if peft_params and peft_params.q_lora:
-        raise NotImplementedError
+        raise NotImplementedError(
+            "QLoRA fine-tuning is not yet supported for custom Oumi models. "
+            "If you need QLoRA support, please use a HuggingFace model instead "
+            "or open a feature request at https://github.com/oumi-ai/oumi."
+        )
 
     if model_params.adapter_model is not None:
-        raise NotImplementedError
+        raise NotImplementedError(
+            "Loading PEFT adapters is not yet supported for custom Oumi models. "
+            "If you need to use PEFT adapters, please use a HuggingFace model instead "
+            "or open a feature request at https://github.com/oumi-ai/oumi."
+        )
 
     dtype = model_params.torch_dtype
     model = model.to(dtype=dtype)
@@ -134,14 +185,44 @@ def build_oumi_model(
     return model
 
 
-class _InternalModelKind(Enum):
-    """Private enum representing the supported types of models for internal use."""
+def _get_quantization_config_for_training(model_params: ModelParams):
+    """Get the appropriate quantization config for training.
 
-    DEFAULT = "default"
-    """Default/unknown model type."""
+    For MXFP4 quantized models that need dequantization during training,
+    this creates the appropriate Mxfp4Config(dequantize=True) configuration.
 
-    IMAGE_TEXT_LLM = "image_text_llm"
-    """Basic image+text LLM."""
+    Args:
+        model_params: Model parameters that may contain quantization config.
+
+    Returns:
+        Quantization config object or None if no quantization needed.
+    """
+    # Check if model_kwargs contains quantization_config
+    if not model_params.model_kwargs:
+        return None
+
+    quant_config = model_params.model_kwargs.get("quantization_config")
+    if not quant_config:
+        return None
+
+    # Handle MXFP4 quantization for training (requires dequantization)
+    if isinstance(quant_config, dict) and quant_config.get("quant_method") == "mxfp4":
+        logger.info(
+            "Detected MXFP4 quantized model. Creating Mxfp4Config(dequantize=True) "
+            "for training."
+        )
+        return Mxfp4Config(dequantize=True)  # pyright: ignore[reportOptionalCall]
+
+    return None
+
+
+def _disable_cache_in_model_config(model: transformers.PreTrainedModel) -> None:
+    # Required for FSDP.
+    # Context: https://github.com/huggingface/transformers/issues/28499
+    model.config.use_cache = False
+    if hasattr(model.config, "text_config"):
+        # This may be needed for VLM-s.
+        model.config.text_config.use_cache = False
 
 
 def build_huggingface_model(
@@ -149,7 +230,13 @@ def build_huggingface_model(
     peft_params: Optional[PeftParams] = None,
     **kwargs,
 ) -> nn.Module:
-    """Downloads and builds the model from the HuggingFace Hub."""
+    """Builds a HuggingFace model.
+
+    If a local directory is specified, the model will be loaded from that checkpoint.
+    Otherwise, `model_params.model_name` is the name of a HuggingFaceHub model. The
+    model will be downloaded from the Hub to a local cache directory if it is not
+    already present, and will be loaded from there.
+    """
     device_map = model_params.device_map
     device_rank_info = get_device_rank_info()
 
@@ -174,52 +261,54 @@ def build_huggingface_model(
         f"Building model using device_map: {device_map} ({device_rank_info})..."
     )
 
-    hf_config, unused_kwargs = transformers.AutoConfig.from_pretrained(
+    hf_config = find_model_hf_config(
         model_params.model_name,
         trust_remote_code=model_params.trust_remote_code,
-        return_unused_kwargs=True,
+        revision=model_params.model_revision,
+        **model_params.model_kwargs,
     )
-    if unused_kwargs:
-        logger.warning(f"Unused kwargs found in config: {unused_kwargs}.")
 
     # (Experimental) Detects dropout probabilities in config and sets them to 0.0.
     if model_params.model_kwargs.get("disable_dropout"):
         disable_dropout(hf_config)
         del model_params.model_kwargs["disable_dropout"]
 
+    # Handle different quantization configurations
     if peft_params and peft_params.q_lora:
         quantization_config = peft_params.to_bits_and_bytes()
     else:
-        quantization_config = None
+        quantization_config = _get_quantization_config_for_training(model_params)
 
     # Both functions instantiate a model from the config, but the main difference is
     # `load_pretrained_weights` also loads the weights, and `from_config` initializes
     # the weights from scratch based on the params in the config and the model class.
-    transformers_model_class, _ = _get_transformers_model_class(hf_config)
+    transformers_model_class = _get_transformers_model_class(hf_config)
+    # Pass in the parsed torch dtype, else pass in the stringified version (which
+    # currently can only be "auto").
+    torch_dtype = model_params.torch_dtype or model_params.torch_dtype_str
 
     if model_params.load_pretrained_weights:
         model = transformers_model_class.from_pretrained(
             config=hf_config,
-            torch_dtype=model_params.torch_dtype,
+            torch_dtype=torch_dtype,
             device_map=device_map,
             trust_remote_code=model_params.trust_remote_code,
             pretrained_model_name_or_path=model_params.model_name,
             quantization_config=quantization_config,
             attn_implementation=model_params.attn_implementation,
+            revision=model_params.model_revision,
             **kwargs,
         )
     else:
         model = transformers_model_class.from_config(
             config=hf_config,
-            torch_dtype=model_params.torch_dtype,
+            torch_dtype=torch_dtype,
             trust_remote_code=model_params.trust_remote_code,
             attn_implementation=model_params.attn_implementation,
             **kwargs,
         )
 
-    # Required for FSDP.
-    # Context: https://github.com/huggingface/transformers/issues/28499
-    model.config.use_cache = False
+    _disable_cache_in_model_config(model)
 
     # TODO Find a better way to handle it
 
@@ -232,70 +321,35 @@ def build_huggingface_model(
 
 
 def _get_transformers_model_class(config):
-    # TODO: Remove this once we have a better way to identify the model class
-    # Or we can just ask the user to specify the model class in the config
-    model_kind: _InternalModelKind = _InternalModelKind.DEFAULT
-    if config.model_type in (
-        "blip-2",
-        "blip",
-        "chameleon",
-        "idefics",
-        "idefics2",
-        "idefics3",
-        "instructblip",
-        "llava",
-        "mllama",
-        "paligemma",
-        "qwen2_vl",
-        "vipllava",
-    ):
-        tested_models = {
-            "blip-2",
-            "llava",
-            "mllama",
-        }  # TODO: OPE-353, make sure we have all models supported
+    llm_info = get_all_models_map().get(config.model_type, None)
 
-        if config.model_type not in tested_models:
+    if llm_info is not None:
+        auto_model_class = llm_info.model_class
+        if not llm_info.tested:
             logger.warning(
                 f"Model type {config.model_type} not tested. "
-                "Using AutoModelForVision2Seq as the model class."
+                f"Using {auto_model_class} as the model class. "
                 "If you encounter errors, please open an issue at https://github.com/oumi-ai/oumi."
             )
-
-        auto_model_class = transformers.AutoModelForVision2Seq
-        model_kind = _InternalModelKind.IMAGE_TEXT_LLM
-    elif config.model_type in ("molmo"):
-        tested_models = {}  # TODO: OPE-353, make sure we have all models supported
-
-        if config.model_type not in tested_models:
-            logger.warning(
-                f"Model type {config.model_type} not tested. "
-                "Using AutoModelForCausalLM as the model class."
-                "If you encounter errors, please open an issue at https://github.com/oumi-ai/oumi."
-            )
-        auto_model_class = transformers.AutoModelForCausalLM
-        model_kind = _InternalModelKind.IMAGE_TEXT_LLM
     else:
         auto_model_class = transformers.AutoModelForCausalLM
-        model_kind = _InternalModelKind.DEFAULT
     logger.info(f"Using model class: {auto_model_class} to instantiate model.")
-    return auto_model_class, model_kind
+    return auto_model_class
 
 
-@functools.cache
-def _is_image_text_llm_impl(model_name: str, trust_remote_code: bool) -> bool:
-    hf_config, unused_kwargs = transformers.AutoConfig.from_pretrained(
-        model_name,
-        trust_remote_code=trust_remote_code,
-        return_unused_kwargs=True,
+def is_image_text_llm_using_model_name(
+    model_name: str, trust_remote_code: bool
+) -> bool:
+    """Determines whether the model is a basic image+text LLM."""
+    model_config = find_internal_model_config_using_model_name(
+        model_name, trust_remote_code=trust_remote_code
     )
-    _, model_kind = _get_transformers_model_class(hf_config)
-    return model_kind == _InternalModelKind.IMAGE_TEXT_LLM
+    return model_config is not None and model_config.visual_config is not None
 
 
 def is_image_text_llm(model_params: ModelParams) -> bool:
     """Determines whether the model is a basic image+text LLM."""
-    return _is_image_text_llm_impl(
+    return is_image_text_llm_using_model_name(
         model_params.model_name, model_params.trust_remote_code
     )
 
@@ -360,9 +414,7 @@ def build_cambrian_model(
         model_path, None, model_name, device_map=(device_map or "auto")
     )
 
-    # Required for FSDP.
-    # Context: https://github.com/huggingface/transformers/issues/28499
-    model.config.use_cache = False
+    _disable_cache_in_model_config(model)
 
     # TODO Find a better way to handle it
 
@@ -392,16 +444,52 @@ def build_tokenizer(
         # If no specific tokenizer is defined, fall back to model's default.
         tokenizer_name = model_params.model_name
 
+    # String for logging
+    if tokenizer_name != model_params.model_name:
+        tokenizer_id_str = (
+            f"tokenizer '{tokenizer_name}' and model '{model_params.model_name}'"
+        )
+    else:
+        tokenizer_id_str = f"model '{model_params.model_name}'"
+
+    internal_config: Optional[InternalModelConfig] = (
+        find_internal_model_config_using_model_name(
+            model_name=tokenizer_name,
+            trust_remote_code=model_params.trust_remote_code,
+        )
+    )
+
+    tokenizer_kwargs = {**model_params.tokenizer_kwargs}
+    if internal_config is not None:
+        if (
+            "padding_side" not in tokenizer_kwargs
+            and internal_config.padding_side is not None
+        ):
+            padding_side = str(internal_config.padding_side.value)
+            logger.info(
+                f"Setting tokenizer to use the '{padding_side}' padding side "
+                f"for {tokenizer_id_str}. "
+                f"The '{padding_side}' padding side is configured as the default value "
+                "for this model type."
+            )
+            tokenizer_kwargs["padding_side"] = padding_side
+
     # Download and build the tokenizer from the HuggingFace Hub.
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         tokenizer_name,
         trust_remote_code=model_params.trust_remote_code,
-        **model_params.tokenizer_kwargs,
+        **tokenizer_kwargs,
     )
 
-    if model_params.tokenizer_pad_token:
+    tokenizer_pad_token = model_params.tokenizer_pad_token
+    if not tokenizer_pad_token:
+        # Try to find the default `tokenizer_pad_token` by model type.
+        if internal_config is not None and internal_config.tokenizer_pad_token:
+            tokenizer_pad_token = internal_config.tokenizer_pad_token
+
+    if tokenizer_pad_token:
         tokenizer.add_special_tokens(
-            special_tokens_dict={"pad_token": model_params.tokenizer_pad_token}
+            special_tokens_dict={"pad_token": tokenizer_pad_token}
         )
 
     # Ensure that the tokenizer has a pad token set.
@@ -422,25 +510,43 @@ def build_tokenizer(
     if model_params.model_max_length:
         tokenizer.model_max_length = model_params.model_max_length
 
-    if model_params.chat_template:
+    template_name: str = ""
+    if model_params.chat_template == "auto":
+        # "auto" means use model's built-in template, don't override
         logger.info(
-            f"Using the chat template '{model_params.chat_template}' "
-            "specified in model config!"
+            f"Chat template set to 'auto' - using model's built-in template "
+            f"for {tokenizer_id_str}."
         )
-        tokenizer.chat_template = build_chat_template(model_params.chat_template)
+    elif model_params.chat_template is not None:
+        template_name = model_params.chat_template
+    else:
+        # Try to find the default chat template by model type.
+        if internal_config is not None and internal_config.chat_template:
+            template_name = internal_config.chat_template
+            logger.info(
+                f"Using the chat template '{template_name}', which is the default "
+                f"for {tokenizer_id_str}. "
+            )
+        elif not tokenizer.chat_template:
+            template_name = "default"
+            logger.warning(
+                f"No chat template found for tokenizer for {tokenizer_id_str}. "
+                "Please specify a chat template using the `chat_template` field. "
+                "This will be required in future versions of Oumi."
+            )
+            logger.warning(
+                "Setting tokenizer to use the 'default' chat template "
+                f"for {tokenizer_id_str}. "
+                "The 'default' template does not use any special tokens, "
+                "and is unlikely to yield good results."
+            )
+        else:
+            logger.info(
+                f"Using the model's built-in chat template for {tokenizer_id_str}."
+            )
 
-    if tokenizer.chat_template is None:
-        logger.warning(
-            "No chat template found for tokenizer. "
-            "Please specify a chat template using the `chat_template` field. "
-            "This will be required in future versions of Oumi."
-        )
-        logger.warning(
-            "Setting tokenizer to use the 'default' chat template. "
-            "The 'default' template does not use any special tokens, "
-            "and is unlikely to yield good results. "
-        )
-        tokenizer.chat_template = build_chat_template(template_name="default")
+    if template_name:
+        tokenizer.chat_template = build_chat_template(template_name=template_name)
 
     return tokenizer
 
@@ -458,15 +564,7 @@ def build_peft_model(
     Returns:
         The built PEFT model.
     """
-    lora_config = LoraConfig(
-        r=peft_params.lora_r,
-        lora_alpha=peft_params.lora_alpha,
-        lora_dropout=peft_params.lora_dropout,
-        target_modules=peft_params.lora_target_modules,
-        modules_to_save=peft_params.lora_modules_to_save,
-        bias=peft_params.lora_bias,  # type: ignore
-        task_type=peft_params.lora_task_type,
-    )
+    lora_config = peft_params.to_lora()
 
     if peft_params.q_lora:
         model = prepare_model_for_kbit_training(
